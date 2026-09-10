@@ -394,6 +394,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(l.status, 200);
     const text = await l.text();
     assert.match(text, /fleeting\.chat/i);
+    assert.match(text, /\?channel=/);
     assert.equal(l.headers.get("access-control-allow-origin"), "*");
     const w = await app.request("/.well-known/llms.txt");
     assert.equal(w.status, 200);
@@ -406,6 +407,8 @@ describe("fleeting.chat spike", () => {
     const html = await res.text();
     assert.match(html, /llms\.txt/);
     assert.match(html, /Generate channel/);
+    assert.match(html, /Copy agent link/);
+    assert.match(html, /Copy id/);
     assert.match(html, /\/v1\/channels\/reserve/);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
   });

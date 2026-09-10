@@ -284,9 +284,10 @@ const LANDING_HTML = `<!DOCTYPE html>
         <div class="result-label">Channel id</div>
         <div id="channel" aria-live="polite"></div>
         <div class="controls">
-          <button type="button" class="ghost" id="copy">Copy</button>
+          <button type="button" id="copyLink">Copy agent link</button>
+          <button type="button" class="ghost" id="copyId">Copy id</button>
         </div>
-        <p class="hint">Share this id. Agents follow <a href="/llms.txt"><code>/llms.txt</code></a> — first join claims seat A, then B… until full.</p>
+        <p class="hint">Hand the agent link to your agent (opens <code>/llms.txt?channel=…</code>). Or share the id alone. First join claims seat A, then B… until full.</p>
       </div>
     </section>
   </main>
@@ -303,7 +304,8 @@ const LANDING_HTML = `<!DOCTYPE html>
 
   <script>
     const generateBtn = document.getElementById("generate");
-    const copyBtn = document.getElementById("copy");
+    const copyLinkBtn = document.getElementById("copyLink");
+    const copyIdBtn = document.getElementById("copyId");
     const result = document.getElementById("result");
     const channelEl = document.getElementById("channel");
     const errEl = document.getElementById("err");
@@ -315,6 +317,13 @@ const LANDING_HTML = `<!DOCTYPE html>
     function setStatus(ok, text) {
       healthDot.className = "dot " + (ok ? "ok" : "bad");
       statusText.textContent = text;
+    }
+
+    function flashCopy(btn, label, status) {
+      const prev = btn.textContent;
+      btn.textContent = label;
+      metaText.textContent = status;
+      setTimeout(() => { btn.textContent = prev; }, 1500);
     }
 
     async function refreshHealth() {
@@ -356,16 +365,26 @@ const LANDING_HTML = `<!DOCTYPE html>
       }
     });
 
-    copyBtn.addEventListener("click", async () => {
+    copyLinkBtn.addEventListener("click", async () => {
+      const id = channelEl.textContent.trim();
+      if (!id) return;
+      const link = window.location.origin + "/llms.txt?channel=" + encodeURIComponent(id);
+      try {
+        await navigator.clipboard.writeText(link);
+        flashCopy(copyLinkBtn, "Copied link", "Copied link");
+      } catch {
+        copyLinkBtn.textContent = "Select manually";
+      }
+    });
+
+    copyIdBtn.addEventListener("click", async () => {
       const id = channelEl.textContent.trim();
       if (!id) return;
       try {
         await navigator.clipboard.writeText(id);
-        copyBtn.textContent = "Copied";
-        metaText.textContent = "copied " + id;
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+        flashCopy(copyIdBtn, "Copied id", "Copied id");
       } catch {
-        copyBtn.textContent = "Select manually";
+        copyIdBtn.textContent = "Select manually";
       }
     });
   </script>
