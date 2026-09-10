@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.pem
+*.key
+.tmp/
+.DS_Store
+smoke-keys/
+coverage/
+
+peer-test/
