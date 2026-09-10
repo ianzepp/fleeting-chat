@@ -12,6 +12,11 @@ import {
   MESSAGE_RETAIN,
   DEFAULT_LONG_POLL_MS,
   MAX_LONG_POLL_MS,
+  DEFAULT_MAX_SEATS,
+  MIN_MAX_SEATS,
+  MAX_MAX_SEATS,
+  assignSeats,
+  nextSeatLetter,
   isValidChannelId,
   type Channel,
   type Message,
@@ -49,7 +54,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>fleeting.chat</h1>
-  <p>Two-seat HTTP channel for agent-to-agent messaging.</p>
+  <p>HTTP channel for agent-to-agent messaging (2–8 seats).</p>
   <p>Humans land here. <strong>Agents</strong> should fetch the contract at
     <a href="/llms.txt"><code>/llms.txt</code></a>
     (also <a href="/.well-known/llms.txt"><code>/.well-known/llms.txt</code></a>).
@@ -146,10 +151,18 @@ async function readJsonBody<T>(
 
 function seatForPubkey(ch: Channel, pem: string): Seat | null {
   const n = normalizePem(pem);
-  for (const seat of ["A", "B"] as Seat[]) {
+  for (const seat of assignSeats(ch.maxSeats)) {
     if (ch.seats[seat] && normalizePem(ch.seats[seat]!.publicKeyPem) === n) return seat;
   }
   return null;
+}
+
+function parseMaxSeats(raw: unknown): { ok: true; value: number } | { ok: false } {
+  if (raw === undefined) return { ok: true, value: DEFAULT_MAX_SEATS };
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < MIN_MAX_SEATS || raw > MAX_MAX_SEATS) {
+    return { ok: false };
+  }
+  return { ok: true, value: raw };
 }
 
 function messagesAfter(ch: Channel, after: string | undefined): Message[] {
@@ -295,7 +308,7 @@ export function createApp(): Hono {
     const ip = clientIp(c);
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
-    const parsed = await readJsonBody<{ public_key_pem?: string }>(c);
+    const parsed = await readJsonBody<{ public_key_pem?: string; max_seats?: unknown }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
@@ -305,6 +318,9 @@ export function createApp(): Hono {
     if (!isValidEd25519PublicPem(body.public_key_pem)) {
       return jsonError(c, 400, "invalid_public_key_pem", "expected ED25519 public key PEM");
     }
+    const maxParsed = parseMaxSeats(body.max_seats);
+    if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
+    const maxSeats = maxParsed.value;
     const now = Date.now();
     let id: string;
     try {
@@ -318,6 +334,7 @@ export function createApp(): Hono {
       createdAt: now,
       absoluteExpiresAt: now + ABSOLUTE_TTL_MS,
       idleExpiresAt: now + IDLE_TTL_MS,
+      maxSeats,
       seats: {
         A: { publicKeyPem: pem, rateWindowStart: now, rateCount: 0 },
       },
@@ -334,10 +351,11 @@ export function createApp(): Hono {
       token: tok.token,
       expires_at: new Date(tok.expiresAt).toISOString(),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
+      max_seats: maxSeats,
     });
   });
 
-  // Join channel → seat B
+  // Join channel → next free seat (B, C, …) or remint existing seat
   app.post("/v1/channels/:id/join", async (c) => {
     store.sweep();
     const badCt = rejectIfNotJson(c);
@@ -362,31 +380,30 @@ export function createApp(): Hono {
       return jsonError(c, 400, "invalid_public_key_pem");
     }
     const pem = normalizePem(body.public_key_pem);
-    if (ch.seats.B) {
-      if (normalizePem(ch.seats.B.publicKeyPem) === pem) {
-        const tok = mintToken(id, "B");
-        store.touchIdle(ch);
-        setApiSecurityHeaders(c);
-        return c.json({
-          seat: "B",
-          token: tok.token,
-          expires_at: new Date(tok.expiresAt).toISOString(),
-        });
-      }
-      return jsonError(c, 409, "channel_full");
+    const existing = seatForPubkey(ch, pem);
+    if (existing) {
+      const tok = mintToken(id, existing);
+      store.touchIdle(ch);
+      setApiSecurityHeaders(c);
+      return c.json({
+        seat: existing,
+        token: tok.token,
+        expires_at: new Date(tok.expiresAt).toISOString(),
+        max_seats: ch.maxSeats,
+      });
     }
-    if (ch.seats.A && normalizePem(ch.seats.A.publicKeyPem) === pem) {
-      return jsonError(c, 400, "public_key_already_seat_a");
-    }
+    const seat = nextSeatLetter(ch);
+    if (!seat) return jsonError(c, 409, "channel_full");
     const now = Date.now();
-    ch.seats.B = { publicKeyPem: pem, rateWindowStart: now, rateCount: 0 };
+    ch.seats[seat] = { publicKeyPem: pem, rateWindowStart: now, rateCount: 0 };
     store.touchIdle(ch, now);
-    const tok = mintToken(id, "B", now);
+    const tok = mintToken(id, seat, now);
     setApiSecurityHeaders(c);
     return c.json({
-      seat: "B",
+      seat,
       token: tok.token,
       expires_at: new Date(tok.expiresAt).toISOString(),
+      max_seats: ch.maxSeats,
     });
   });
 

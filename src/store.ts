@@ -1,6 +1,31 @@
 /** In-memory channel store for the fleeting.chat spike. */
 
-export type Seat = "A" | "B";
+export const SEAT_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
+export type Seat = (typeof SEAT_LETTERS)[number];
+
+export const MIN_MAX_SEATS = 2;
+export const MAX_MAX_SEATS = 8;
+export const DEFAULT_MAX_SEATS = 2;
+
+export function assignSeats(maxSeats: number): Seat[] {
+  return SEAT_LETTERS.slice(0, maxSeats) as Seat[];
+}
+
+/** First free seat among A..H limited by maxSeats, or null if full. */
+export function nextSeatLetter(ch: Channel): Seat | null {
+  for (const s of assignSeats(ch.maxSeats)) {
+    if (!ch.seats[s]) return s;
+  }
+  return null;
+}
+
+export function occupiedSeatCount(ch: Channel): number {
+  let n = 0;
+  for (const s of assignSeats(ch.maxSeats)) {
+    if (ch.seats[s]) n += 1;
+  }
+  return n;
+}
 
 export interface Message {
   id: string;
@@ -20,6 +45,7 @@ export interface Channel {
   createdAt: number;
   absoluteExpiresAt: number;
   idleExpiresAt: number;
+  maxSeats: number;
   seats: Partial<Record<Seat, SeatState>>;
   messages: Message[];
   nextMsgSeq: number;

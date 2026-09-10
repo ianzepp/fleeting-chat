@@ -40,6 +40,7 @@ describe("fleeting.chat spike", () => {
     });
     assert.equal(create.status, 200);
     assert.equal(create.body.seat, "A");
+    assert.equal(create.body.max_seats, 2);
     assert.match(create.body.channel_id, /^[a-z]+-[a-z]+$/);
     const channelId = create.body.channel_id as string;
     const tokenA = create.body.token as string;
@@ -51,6 +52,7 @@ describe("fleeting.chat spike", () => {
     });
     assert.equal(join.status, 200);
     assert.equal(join.body.seat, "B");
+    assert.equal(join.body.max_seats, 2);
     const tokenB = join.body.token as string;
 
     const full = await json(app, `/v1/channels/${channelId}/join`, {
@@ -82,22 +84,111 @@ describe("fleeting.chat spike", () => {
     assert.equal(poll.body.messages[0].body, "ping");
   });
 
-  it("rejects same pubkey for both seats", async () => {
+  it("same pubkey re-join remints seat and cannot take two seats", async () => {
     freshStore();
     const app = createApp();
     const a = ed25519PemPair();
+    const b = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
-    const join = await json(app, `/v1/channels/${create.body.channel_id}/join`, {
+    const channelId = create.body.channel_id as string;
+    const rejoin = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
-    assert.equal(join.status, 400);
-    assert.equal(join.body.error, "public_key_already_seat_a");
+    assert.equal(rejoin.status, 200);
+    assert.equal(rejoin.body.seat, "A");
+    assert.ok(rejoin.body.token);
+    assert.notEqual(rejoin.body.token, create.body.token);
+    // still only A occupied — B can join
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+    assert.equal(joinB.body.seat, "B");
+  });
+
+  it("max_seats 3 allows two joins then channel_full; messages from C", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const c = ed25519PemPair();
+    const d = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, max_seats: 3 }),
+    });
+    assert.equal(create.status, 200);
+    assert.equal(create.body.max_seats, 3);
+    const channelId = create.body.channel_id as string;
+
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.max_seats, 3);
+
+    const joinC = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: c.publicPem }),
+    });
+    assert.equal(joinC.status, 200);
+    assert.equal(joinC.body.seat, "C");
+    const tokenC = joinC.body.token as string;
+
+    const full = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: d.publicPem }),
+    });
+    assert.equal(full.status, 409);
+    assert.equal(full.body.error, "channel_full");
+
+    const send = await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenC}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "from C" }),
+    });
+    assert.equal(send.status, 201);
+    assert.equal(send.body.message.from, "C");
+
+    const poll = await json(app, `/v1/channels/${channelId}/messages?after=0`, {
+      headers: { Authorization: `Bearer ${create.body.token}` },
+    });
+    assert.equal(poll.status, 200);
+    assert.equal(poll.body.messages.length, 1);
+    assert.equal(poll.body.messages[0].from, "C");
+    assert.equal(poll.body.messages[0].body, "from C");
+  });
+
+  it("invalid max_seats 1 and 9 fail", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    for (const bad of [1, 9, 2.5, "3", null]) {
+      const res = await json(app, "/v1/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_key_pem: a.publicPem, max_seats: bad }),
+      });
+      assert.equal(res.status, 400, `max_seats=${JSON.stringify(bad)}`);
+      assert.equal(res.body.error, "invalid_max_seats");
+    }
   });
 
   it("challenge / sign refresh", async () => {

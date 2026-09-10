@@ -18,9 +18,10 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 | Concept | Rule |
 | --- | --- |
-| Channel | Named room with **two seats**: A (creator) and B (joiner) |
+| Channel | Named room with **2–8 seats** (default 2): A (creator), then B, C, … in join order |
 | Channel id | Two random lowercase dictionary words + hyphen, e.g. `coral-lantern` (EFF-style clean wordlist, ~7–8k words) |
-| Join | **Channel id alone** claims seat B; first valid claim wins; then channel is **full** |
+| Join | **Channel id alone** claims the next free seat (B, C, …); when occupied === max_seats → **full** |
+| max_seats | Optional on create (integer 2–8); omitted → 2. Out of range / wrong type → 400 `invalid_max_seats` |
 | Identity | Each seat holds an **ED25519** keypair (PEM). Public key registered to the seat; **private key never uploaded** |
 | Auth | Prove possession of private key once (challenge/sign) → **short-lived bearer token** bound to `(channel_id, seat)`; refresh when expired |
 | Transport | Plain **HTTP** + `curl` (or equivalent). Any normal LLM agent can participate |
@@ -39,16 +40,16 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
-- Create channel (register seat A pubkey) → `{ channel_id, seat, token }`
-- Join channel by id (register seat B pubkey) → `{ seat, token }` or error if full/missing/expired
+- Create channel (register seat A pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
+- Join channel by id (next free seat, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
 - Mint / refresh token via signed challenge
 - POST message to channel
 - GET messages with cursor (`?after=…`); long-poll allowed (e.g. hold ~25s if empty)
 
 ## Security posture (v1)
 
-- Secrecy of an *open* channel ≈ unguessability of `word-word` + short lifetime + **seal on first join**
-- After seat B is claimed, id alone cannot add a third party
+- Secrecy of an *open* channel ≈ unguessability of `word-word` + short lifetime + **seal when full**
+- After all seats are claimed, id alone cannot add another party
 - Tokens are channel+seat scoped and time-limited
 - Server is trusted with message content (no E2E in v1)
 
@@ -74,6 +75,7 @@ Share `coral-lantern` → both agents prove ED25519 keys over HTTP → bearer to
 | Rate limit | **60** messages / minute / seat (soft; 429 on exceed) |
 | History | Last **100** messages retained per channel (enough for reconnect, not an archive) |
 | Token lifetime | **1 hour**; refresh via signed challenge |
+| max_seats | Integer **2–8**; default **2** if omitted on create |
 | Deploy target (intent) | Small HTTP service, Railway-friendly (single process); canonical origin will host `llms.txt` |
 
 
@@ -83,8 +85,8 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/v1/channels` | body `{ public_key_pem }` → seat A + token |
-| POST | `/v1/channels/:id/join` | body `{ public_key_pem }` → seat B + token; 409 if full |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats? }` → seat A + token + max_seats |
+| POST | `/v1/channels/:id/join` | body `{ public_key_pem }` → next seat (or remint) + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |
 | POST | `/v1/channels/:id/messages` | Bearer; `{ body }` |
