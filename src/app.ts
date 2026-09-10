@@ -2,12 +2,20 @@ import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import {
   store,
   ABSOLUTE_TTL_MS,
   IDLE_TTL_MS,
   BODY_MAX_BYTES,
   RAW_BODY_MAX_BYTES,
+  FILE_RAW_BODY_MAX_BYTES,
+  FILE_MAX_BYTES,
+  FILE_MAX_PER_CHANNEL,
+  FILE_DEFAULT_TTL_SECONDS,
+  FILE_MIN_TTL_SECONDS,
+  FILE_MAX_TTL_SECONDS,
+  FILE_FILENAME_MAX,
   RATE_LIMIT_PER_MIN,
   MESSAGE_RETAIN,
   DEFAULT_LONG_POLL_MS,
@@ -20,6 +28,7 @@ import {
   nextSeatLetter,
   normalizeChannelId,
   type Channel,
+  type ChannelFile,
   type Message,
   type Seat,
 } from "./store.js";
@@ -450,13 +459,14 @@ async function readJsonBody<T>(
     };
     json: (b: unknown, s?: number) => Response;
     header: (k: string, v: string) => void;
-  }
+  },
+  maxRawBytes = RAW_BODY_MAX_BYTES
 ): Promise<{ ok: true; body: T } | { ok: false; response: Response }> {
   const cl = c.req.header("content-length");
   if (cl) {
     const n = parseInt(cl, 10);
-    if (!Number.isNaN(n) && n > RAW_BODY_MAX_BYTES) {
-      return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`) };
+    if (!Number.isNaN(n) && n > maxRawBytes) {
+      return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`) };
     }
   }
   let raw: string;
@@ -465,8 +475,8 @@ async function readJsonBody<T>(
   } catch {
     return { ok: false, response: jsonError(c, 400, "invalid_json") };
   }
-  if (Buffer.byteLength(raw, "utf8") > RAW_BODY_MAX_BYTES) {
-    return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`) };
+  if (Buffer.byteLength(raw, "utf8") > maxRawBytes) {
+    return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`) };
   }
   if (!raw.trim()) {
     return { ok: false, response: jsonError(c, 400, "invalid_json") };
@@ -586,6 +596,32 @@ function clearWaiter(
   waiter.resolve(msgs);
 }
 
+
+function isValidFilename(name: string): boolean {
+  if (name.length < 1 || name.length > FILE_FILENAME_MAX) return false;
+  if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
+  return true;
+}
+
+function decodeContentBase64(raw: string): Buffer | null {
+  const cleaned = raw.replace(/\s+/g, "");
+  if (cleaned.length === 0) return Buffer.alloc(0);
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleaned)) return null;
+  if (cleaned.length % 4 !== 0) return null;
+  try {
+    return Buffer.from(cleaned, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function parseTtlSeconds(raw: unknown): { ok: true; value: number } | { ok: false } {
+  if (raw === undefined) return { ok: true, value: FILE_DEFAULT_TTL_SECONDS };
+  if (typeof raw !== "number" || !Number.isInteger(raw)) return { ok: false };
+  if (raw < FILE_MIN_TTL_SECONDS || raw > FILE_MAX_TTL_SECONDS) return { ok: false };
+  return { ok: true, value: raw };
+}
+
 export function createApp(): Hono {
   const app = new Hono();
 
@@ -609,8 +645,11 @@ export function createApp(): Hono {
       const cl = c.req.header("content-length");
       if (cl) {
         const n = parseInt(cl, 10);
-        if (!Number.isNaN(n) && n > RAW_BODY_MAX_BYTES) {
-          return jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`);
+        const isFileUpload =
+          c.req.method === "POST" && /^\/v1\/channels\/[^/]+\/files\/?$/.test(c.req.path);
+        const max = isFileUpload ? FILE_RAW_BODY_MAX_BYTES : RAW_BODY_MAX_BYTES;
+        if (!Number.isNaN(n) && n > max) {
+          return jsonError(c, 413, "body_too_large", `max ${max} raw bytes`);
         }
       }
     }
@@ -709,6 +748,7 @@ export function createApp(): Hono {
       seats: {},
       messages: [],
       nextMsgSeq: 1,
+      files: new Map(),
       waiters: [],
     };
     store.channels.set(id, ch);
@@ -769,6 +809,7 @@ export function createApp(): Hono {
       },
       messages: [],
       nextMsgSeq: 1,
+      files: new Map(),
       waiters: [],
     };
     store.channels.set(id, ch);
@@ -1023,6 +1064,119 @@ export function createApp(): Hono {
     return c.json({
       messages: msgs,
       cursor: ch.messages.length ? ch.messages[ch.messages.length - 1].id : after || "0",
+    });
+  });
+
+
+
+  // Upload file (email-style base64 on the wire; store decoded bytes)
+  app.post("/v1/channels/:id/files", async (c) => {
+    store.sweep();
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+
+    const parsed = await readJsonBody<{
+      filename?: unknown;
+      content_type?: unknown;
+      content_base64?: unknown;
+      ttl_seconds?: unknown;
+    }>(c, FILE_RAW_BODY_MAX_BYTES);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    if (typeof body.filename !== "string" || !isValidFilename(body.filename)) {
+      return jsonError(c, 400, "invalid_filename");
+    }
+    let contentType = "application/octet-stream";
+    if (body.content_type !== undefined && body.content_type !== null) {
+      if (typeof body.content_type !== "string" || body.content_type.trim().length === 0) {
+        return jsonError(c, 400, "invalid_content_type");
+      }
+      contentType = body.content_type.trim();
+    }
+    if (typeof body.content_base64 !== "string") {
+      return jsonError(c, 400, "missing_content_base64");
+    }
+    const decoded = decodeContentBase64(body.content_base64);
+    if (!decoded) return jsonError(c, 400, "invalid_content_base64");
+    if (decoded.length > FILE_MAX_BYTES) {
+      return jsonError(c, 413, "file_too_large", `max ${FILE_MAX_BYTES} decoded bytes`);
+    }
+    const ttlParsed = parseTtlSeconds(body.ttl_seconds);
+    if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
+
+    store.sweepChannelFiles(ch);
+    if (ch.files.size >= FILE_MAX_PER_CHANNEL) {
+      return jsonError(c, 409, "file_limit");
+    }
+
+    const now = Date.now();
+    const fileId = randomBytes(16).toString("base64url");
+    const expiresAt = now + ttlParsed.value * 1000;
+    const rec: ChannelFile = {
+      filename: body.filename,
+      contentType,
+      bytes: decoded,
+      expiresAt,
+      seat: tok.seat,
+    };
+    ch.files.set(fileId, rec);
+    store.touchIdle(ch, now);
+    setApiSecurityHeaders(c);
+    return c.json(
+      {
+        file_id: fileId,
+        filename: rec.filename,
+        content_type: rec.contentType,
+        bytes: rec.bytes.length,
+        expires_at: new Date(rec.expiresAt).toISOString(),
+        seat: rec.seat,
+      },
+      201
+    );
+  });
+
+  // Download file as JSON (base64 on the wire)
+  app.get("/v1/channels/:id/files/:file_id", async (c) => {
+    store.sweep();
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+
+    const fileId = c.req.param("file_id");
+    store.sweepChannelFiles(ch);
+    const rec = ch.files.get(fileId);
+    if (!rec || Date.now() >= rec.expiresAt) {
+      if (rec) ch.files.delete(fileId);
+      return jsonError(c, 404, "file_not_found");
+    }
+
+    store.touchIdle(ch);
+    setApiSecurityHeaders(c);
+    return c.json({
+      file_id: fileId,
+      filename: rec.filename,
+      content_type: rec.contentType,
+      bytes: rec.bytes.length,
+      expires_at: new Date(rec.expiresAt).toISOString(),
+      seat: rec.seat,
+      content_base64: rec.bytes.toString("base64"),
     });
   });
 

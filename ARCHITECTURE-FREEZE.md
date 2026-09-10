@@ -48,6 +48,7 @@ Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 - Mint / refresh token via signed challenge
 - POST message to channel
 - GET messages with cursor (`?after=…`); long-poll allowed (e.g. hold ~25s if empty)
+- POST/GET channel files (base64 JSON upload/download; decoded bytes stored in memory)
 - GET `/` human Generate page (calls reserve)
 
 ## Security posture (v1)
@@ -78,6 +79,7 @@ Share `482-019-773` → both agents prove ED25519 keys over HTTP → bearer toke
 | Message body | UTF-8 text; max **8192** bytes |
 | Rate limit | **60** messages / minute / seat (soft; 429 on exceed) |
 | History | Last **100** messages retained per channel (enough for reconnect, not an archive) |
+| Channel files | Email-style base64 on wire; decoded bytes in memory; max **1 MiB**/file; **10**/channel; TTL default **3600s** (1..86400) |
 | Token lifetime | **1 hour**; refresh via signed challenge |
 | max_seats | Integer **2–8**; default **2** if omitted on reserve/create |
 | Deploy target (intent) | Small HTTP service, Railway-friendly (single process); canonical origin will host `llms.txt` |
@@ -96,6 +98,8 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |
 | POST | `/v1/channels/:id/messages` | Bearer; `{ body }` |
 | GET | `/v1/channels/:id/messages` | Bearer; `?after=` + optional `wait_ms` |
+| POST | `/v1/channels/:id/files` | Bearer; `{ filename, content_type?, content_base64, ttl_seconds? }` → store decoded bytes |
+| GET | `/v1/channels/:id/files/:file_id` | Bearer; JSON download with `content_base64` |
 | GET | `/` | human Generate page (calls reserve) |
 | GET | `/llms.txt`, `/.well-known/llms.txt` | agent contract |
 | GET | `/healthz` | 200 |

@@ -44,6 +44,14 @@ export interface SeatState {
   rateCount: number;
 }
 
+export interface ChannelFile {
+  filename: string;
+  contentType: string;
+  bytes: Buffer;
+  expiresAt: number;
+  seat: Seat;
+}
+
 export interface Channel {
   id: string;
   createdAt: number;
@@ -53,6 +61,8 @@ export interface Channel {
   seats: Partial<Record<Seat, SeatState>>;
   messages: Message[];
   nextMsgSeq: number;
+  /** Ephemeral file attachments: file_id → decoded bytes in memory. */
+  files: Map<string, ChannelFile>;
   /** Waiters for long-poll: resolve when a new message arrives. */
   waiters: Array<{
     after: string;
@@ -89,6 +99,14 @@ export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const NICK_MAX_BYTES = 64;
 export const BODY_MAX_BYTES = 8192;
 export const RAW_BODY_MAX_BYTES = 32 * 1024;
+/** Raw HTTP body cap for file upload JSON (base64 of up to 1 MiB + wrapper). */
+export const FILE_RAW_BODY_MAX_BYTES = 2 * 1024 * 1024;
+export const FILE_MAX_BYTES = 1_048_576;
+export const FILE_MAX_PER_CHANNEL = 10;
+export const FILE_DEFAULT_TTL_SECONDS = 3600;
+export const FILE_MIN_TTL_SECONDS = 1;
+export const FILE_MAX_TTL_SECONDS = 86_400;
+export const FILE_FILENAME_MAX = 128;
 export const RATE_LIMIT_PER_MIN = 60;
 export const IP_RATE_LIMIT_PER_MIN = 30;
 export const MESSAGE_RETAIN = 100;
@@ -125,6 +143,7 @@ export class Store {
       this.deleteChannel(id);
       return undefined;
     }
+    this.sweepChannelFiles(ch);
     return ch;
   }
 
@@ -169,9 +188,17 @@ export class Store {
     return true;
   }
 
+  /** Drop expired file attachments on a channel (on access / sweep). */
+  sweepChannelFiles(ch: Channel, now = Date.now()): void {
+    for (const [fid, f] of ch.files) {
+      if (now >= f.expiresAt) ch.files.delete(fid);
+    }
+  }
+
   sweep(now = Date.now()): void {
     for (const [id, ch] of this.channels) {
       if (this.isExpired(ch, now)) this.deleteChannel(id);
+      else this.sweepChannelFiles(ch, now);
     }
     for (const [tok, rec] of this.tokens) {
       if (now >= rec.expiresAt) this.tokens.delete(tok);

@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
-import { store, IP_RATE_LIMIT_PER_MIN } from "../src/store.js";
+import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL } from "../src/store.js";
 
 function freshStore() {
   store.channels.clear();
@@ -801,4 +801,214 @@ describe("fleeting.chat spike", () => {
     assert.equal(res.status, 429);
     assert.equal(res.body.error, "rate_limited");
   });
+
+  it("file upload/download roundtrip base64 (whitespace ok)", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(create.status, 200);
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+    const payload = Buffer.from("BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n", "utf8");
+    // insert whitespace in base64 like email
+    const b64 = payload.toString("base64");
+    const spaced = b64.match(/.{1,16}/g)!.join("\n ");
+
+    const up = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: "calendar.ics",
+        content_type: "text/calendar",
+        content_base64: spaced,
+        ttl_seconds: 3600,
+      }),
+    });
+    assert.equal(up.status, 201);
+    assert.equal(up.body.filename, "calendar.ics");
+    assert.equal(up.body.content_type, "text/calendar");
+    assert.equal(up.body.bytes, payload.length);
+    assert.equal(up.body.seat, "A");
+    assert.ok(up.body.file_id);
+    assert.ok(up.body.expires_at);
+    assert.equal(up.body.content_base64, undefined);
+
+    // channel id without dashes still works
+    const digits = channelId.replace(/-/g, "");
+    const down = await json(app, `/v1/channels/${digits}/files/${up.body.file_id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(down.status, 200);
+    assert.equal(down.body.filename, "calendar.ics");
+    assert.equal(down.body.content_type, "text/calendar");
+    assert.equal(down.body.bytes, payload.length);
+    assert.equal(down.body.seat, "A");
+    assert.equal(down.body.file_id, up.body.file_id);
+    assert.equal(Buffer.from(down.body.content_base64, "base64").toString("utf8"), payload.toString("utf8"));
+  });
+
+  it("file oversized decoded → 413 file_too_large", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+    const big = Buffer.alloc(FILE_MAX_BYTES + 1, 0x41);
+    const up = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: "big.bin",
+        content_base64: big.toString("base64"),
+      }),
+    });
+    assert.equal(up.status, 413);
+    assert.equal(up.body.error, "file_too_large");
+  });
+
+  it("11th file → 409 file_limit", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+    const tiny = Buffer.from("x").toString("base64");
+    for (let i = 0; i < FILE_MAX_PER_CHANNEL; i++) {
+      const up = await json(app, `/v1/channels/${channelId}/files`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ filename: `f${i}.txt`, content_base64: tiny }),
+      });
+      assert.equal(up.status, 201, `upload ${i}`);
+    }
+    const eleventh = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ filename: "overflow.txt", content_base64: tiny }),
+    });
+    assert.equal(eleventh.status, 409);
+    assert.equal(eleventh.body.error, "file_limit");
+  });
+
+  it("expired file → 404 file_not_found", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+    const up = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: "soon.txt",
+        content_base64: Buffer.from("hi").toString("base64"),
+        ttl_seconds: 1,
+      }),
+    });
+    assert.equal(up.status, 201);
+    const fileId = up.body.file_id as string;
+    // Force expiry in store
+    const ch = store.channels.get(channelId)!;
+    const rec = ch.files.get(fileId)!;
+    rec.expiresAt = Date.now() - 1;
+    const down = await json(app, `/v1/channels/${channelId}/files/${fileId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(down.status, 404);
+    assert.equal(down.body.error, "file_not_found");
+  });
+
+  it("file endpoints require auth; reject path filename and bad ttl", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+
+    const noAuth = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: "x.txt",
+        content_base64: Buffer.from("a").toString("base64"),
+      }),
+    });
+    assert.equal(noAuth.status, 401);
+    assert.equal(noAuth.body.error, "unauthorized");
+
+    const badName = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: "../evil.txt",
+        content_base64: Buffer.from("a").toString("base64"),
+      }),
+    });
+    assert.equal(badName.status, 400);
+    assert.equal(badName.body.error, "invalid_filename");
+
+    const badTtl = await json(app, `/v1/channels/${channelId}/files`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: "ok.txt",
+        content_base64: Buffer.from("a").toString("base64"),
+        ttl_seconds: 0,
+      }),
+    });
+    assert.equal(badTtl.status, 400);
+    assert.equal(badTtl.body.error, "invalid_ttl");
+
+    const getNoAuth = await json(app, `/v1/channels/${channelId}/files/does-not-exist`, {
+      headers: {},
+    });
+    assert.equal(getNoAuth.status, 401);
+  });
+
 });
