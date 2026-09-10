@@ -12,6 +12,13 @@ export function normalizePem(pem: string): string {
   return pem.trim().replace(/\r\n/g, "\n") + "\n";
 }
 
+function safeEqualStr(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
 export function isValidEd25519PublicPem(pem: string): boolean {
   try {
     const key = createPublicKey(normalizePem(pem));
@@ -76,14 +83,16 @@ export function consumeChallenge(
     store.challenges.delete(challenge);
     return false;
   }
-  if (rec.channelId !== channelId) return false;
-  const a = Buffer.from(normalizePem(rec.publicKeyPem));
-  const b = Buffer.from(normalizePem(publicKeyPem));
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  if (!safeEqualStr(rec.channelId, channelId)) return false;
+  if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
   store.challenges.delete(challenge);
   return true;
 }
 
+/**
+ * Resolve Bearer token via Map lookup (O(1); no string equality scan).
+ * Expired tokens are deleted. Callers compare channelId with === (public id).
+ */
 export function resolveBearer(authHeader: string | undefined): TokenRecord | null {
   if (!authHeader) return null;
   const m = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());

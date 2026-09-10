@@ -24,7 +24,13 @@ export interface Channel {
   messages: Message[];
   nextMsgSeq: number;
   /** Waiters for long-poll: resolve when a new message arrives. */
-  waiters: Array<{ after: string; resolve: (msgs: Message[]) => void; timer: ReturnType<typeof setTimeout> }>;
+  waiters: Array<{
+    after: string;
+    resolve: (msgs: Message[]) => void;
+    timer: ReturnType<typeof setTimeout>;
+    abortHandler?: () => void;
+    signal?: AbortSignal;
+  }>;
 }
 
 export interface TokenRecord {
@@ -41,21 +47,36 @@ export interface ChallengeRecord {
   expiresAt: number;
 }
 
+export interface IpRateWindow {
+  start: number;
+  count: number;
+}
+
 export const ABSOLUTE_TTL_MS = 48 * 60 * 60 * 1000;
 export const IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 export const TOKEN_TTL_MS = 60 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const BODY_MAX_BYTES = 8192;
+export const RAW_BODY_MAX_BYTES = 32 * 1024;
 export const RATE_LIMIT_PER_MIN = 60;
+export const IP_RATE_LIMIT_PER_MIN = 30;
 export const MESSAGE_RETAIN = 100;
 export const DEFAULT_LONG_POLL_MS = 25_000;
 export const MAX_LONG_POLL_MS = 30_000;
+
+export const CHANNEL_ID_RE = /^[a-z]+-[a-z]+$/;
+
+export function isValidChannelId(id: string): boolean {
+  return CHANNEL_ID_RE.test(id);
+}
 
 export class Store {
   channels = new Map<string, Channel>();
   tokens = new Map<string, TokenRecord>();
   challenges = new Map<string, ChallengeRecord>();
   usedChannelIds = new Set<string>();
+  /** create + join + auth endpoints per IP */
+  ipRate = new Map<string, IpRateWindow>();
 
   getChannel(id: string): Channel | undefined {
     const ch = this.channels.get(id);
@@ -80,6 +101,9 @@ export class Store {
     if (ch) {
       for (const w of ch.waiters) {
         clearTimeout(w.timer);
+        if (w.signal && w.abortHandler) {
+          w.signal.removeEventListener("abort", w.abortHandler);
+        }
         w.resolve([]);
       }
       ch.waiters = [];
@@ -93,6 +117,18 @@ export class Store {
     }
   }
 
+  /** Returns false if over limit (caller should 429). Increments on success. */
+  checkIpRate(ip: string, now = Date.now()): boolean {
+    let win = this.ipRate.get(ip);
+    if (!win || now - win.start >= 60_000) {
+      win = { start: now, count: 0 };
+      this.ipRate.set(ip, win);
+    }
+    if (win.count >= IP_RATE_LIMIT_PER_MIN) return false;
+    win.count += 1;
+    return true;
+  }
+
   sweep(now = Date.now()): void {
     for (const [id, ch] of this.channels) {
       if (this.isExpired(ch, now)) this.deleteChannel(id);
@@ -102,6 +138,9 @@ export class Store {
     }
     for (const [cid, rec] of this.challenges) {
       if (now >= rec.expiresAt) this.challenges.delete(cid);
+    }
+    for (const [ip, win] of this.ipRate) {
+      if (now - win.start >= 60_000) this.ipRate.delete(ip);
     }
   }
 }
