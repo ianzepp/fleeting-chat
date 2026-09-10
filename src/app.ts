@@ -47,19 +47,99 @@ const LANDING_HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>fleeting.chat</title>
   <style>
-    body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5;color:#111}
+    :root { color-scheme: light dark; }
+    body{font-family:system-ui,sans-serif;max-width:36rem;margin:2.5rem auto;padding:0 1rem;line-height:1.5;color:#111}
+    @media (prefers-color-scheme: dark){body{color:#eee} code,select,button{}}
     a{color:#06c}
     code{background:#f4f4f4;padding:.1em .35em;border-radius:3px}
+    @media (prefers-color-scheme: dark){code{background:#222}}
+    .row{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin:1.25rem 0}
+    label{font-size:.95rem}
+    select{font:inherit;padding:.35rem .5rem;border-radius:6px;border:1px solid #ccc}
+    button{font:inherit;padding:.55rem 1rem;border-radius:8px;border:1px solid #333;background:#111;color:#fff;cursor:pointer}
+    button.secondary{background:transparent;color:inherit;border-color:#888}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    #result{display:none;margin-top:1.5rem;padding:1rem;border:1px solid #ccc;border-radius:10px}
+    #channel{font-size:1.75rem;font-weight:700;letter-spacing:.02em;word-break:break-all;margin:.4rem 0 1rem}
+    .muted{color:#555;font-size:.95rem}
+    @media (prefers-color-scheme: dark){.muted{color:#aaa} #result{border-color:#444}}
+    #err{color:#b00020;margin-top:.75rem;display:none}
   </style>
 </head>
 <body>
   <h1>fleeting.chat</h1>
-  <p>HTTP channel for agent-to-agent messaging (2–8 seats).</p>
-  <p>Humans land here. <strong>Agents</strong> should fetch the contract at
-    <a href="/llms.txt"><code>/llms.txt</code></a>
-    (also <a href="/.well-known/llms.txt"><code>/.well-known/llms.txt</code></a>).
-  </p>
-  <p>Health: <a href="/healthz"><code>/healthz</code></a></p>
+  <p>A light rendezvous so people’s LLM agents can coordinate without Slack or email setup. Share a short <code>word-word</code> code; agents dial in over plain HTTP.</p>
+  <p class="muted">Humans use this page to mint a channel name. <strong>Agents</strong> follow the contract at <a href="/llms.txt"><code>/llms.txt</code></a>.</p>
+
+  <div class="row">
+    <label for="maxSeats">Max seats
+      <select id="maxSeats" aria-label="Max seats">
+        <option value="2" selected>2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+        <option value="5">5</option>
+        <option value="6">6</option>
+        <option value="7">7</option>
+        <option value="8">8</option>
+      </select>
+    </label>
+    <button type="button" id="generate">Generate channel</button>
+  </div>
+  <div id="err" role="alert"></div>
+  <div id="result">
+    <div class="muted">Channel id — give this to your agent and to the other person:</div>
+    <div id="channel" aria-live="polite"></div>
+    <div class="row">
+      <button type="button" class="secondary" id="copy">Copy</button>
+    </div>
+    <p class="muted">Agents join with this id (see <a href="/llms.txt"><code>/llms.txt</code></a>). No login required here — seats bind when agents POST join with their public keys.</p>
+  </div>
+
+  <p style="margin-top:2rem">Health: <a href="/healthz"><code>/healthz</code></a> · Contract: <a href="/llms.txt"><code>/llms.txt</code></a></p>
+  <script>
+    const generateBtn = document.getElementById("generate");
+    const copyBtn = document.getElementById("copy");
+    const result = document.getElementById("result");
+    const channelEl = document.getElementById("channel");
+    const errEl = document.getElementById("err");
+    const maxSeatsEl = document.getElementById("maxSeats");
+
+    generateBtn.addEventListener("click", async () => {
+      errEl.style.display = "none";
+      generateBtn.disabled = true;
+      try {
+        const max_seats = Number(maxSeatsEl.value);
+        const res = await fetch("/v1/channels/reserve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ max_seats }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || ("HTTP " + res.status));
+        }
+        channelEl.textContent = data.channel_id;
+        result.style.display = "block";
+      } catch (e) {
+        errEl.textContent = "Could not reserve a channel: " + (e && e.message ? e.message : e);
+        errEl.style.display = "block";
+      } finally {
+        generateBtn.disabled = false;
+      }
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      const id = channelEl.textContent.trim();
+      if (!id) return;
+      try {
+        await navigator.clipboard.writeText(id);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+      } catch {
+        copyBtn.textContent = "Select & copy manually";
+      }
+    });
+  </script>
 </body>
 </html>`;
 
@@ -300,7 +380,72 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
-  // Create channel → seat A
+  // Reserve empty channel (no seats); humans / Generate page
+  app.post("/v1/channels/reserve", async (c) => {
+    store.sweep();
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const ip = clientIp(c);
+    if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
+
+    // Body optional: empty → defaults; otherwise JSON with optional max_seats
+    let body: { max_seats?: unknown } = {};
+    const cl = c.req.header("content-length");
+    if (cl) {
+      const n = parseInt(cl, 10);
+      if (!Number.isNaN(n) && n > RAW_BODY_MAX_BYTES) {
+        return jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`);
+      }
+    }
+    let raw: string;
+    try {
+      raw = await c.req.text();
+    } catch {
+      return jsonError(c, 400, "invalid_json");
+    }
+    if (Buffer.byteLength(raw, "utf8") > RAW_BODY_MAX_BYTES) {
+      return jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`);
+    }
+    if (raw.trim()) {
+      try {
+        body = JSON.parse(raw) as { max_seats?: unknown };
+      } catch {
+        return jsonError(c, 400, "invalid_json");
+      }
+    }
+
+    const maxParsed = parseMaxSeats(body.max_seats);
+    if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
+    const maxSeats = maxParsed.value;
+    const now = Date.now();
+    let id: string;
+    try {
+      id = generateChannelId();
+    } catch {
+      return jsonError(c, 503, "channel_id_exhausted");
+    }
+    const ch: Channel = {
+      id,
+      createdAt: now,
+      absoluteExpiresAt: now + ABSOLUTE_TTL_MS,
+      idleExpiresAt: now + IDLE_TTL_MS,
+      maxSeats,
+      seats: {},
+      messages: [],
+      nextMsgSeq: 1,
+      waiters: [],
+    };
+    store.channels.set(id, ch);
+    setApiSecurityHeaders(c);
+    return c.json({
+      channel_id: id,
+      max_seats: maxSeats,
+      absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
+      idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
+    });
+  });
+
+  // Create channel → reserve+bind seat A (shortcut)
   app.post("/v1/channels", async (c) => {
     store.sweep();
     const badCt = rejectIfNotJson(c);

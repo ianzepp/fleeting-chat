@@ -20,8 +20,8 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 | --- | --- |
 | Channel | Named room with **2–8 seats** (default 2): A (creator), then B, C, … in join order |
 | Channel id | Two random lowercase dictionary words + hyphen, e.g. `coral-lantern` (EFF-style clean wordlist, ~7–8k words) |
-| Join | **Channel id alone** claims the next free seat (B, C, …); when occupied === max_seats → **full** |
-| max_seats | Optional on create (integer 2–8); omitted → 2. Out of range / wrong type → 400 `invalid_max_seats` |
+| Join | **Channel id alone** claims the next free seat (A on empty reserve, else B, C, …); when occupied === max_seats → **full** |
+| max_seats | Optional on reserve/create (integer 2–8); omitted → 2. Out of range / wrong type → 400 `invalid_max_seats` |
 | Identity | Each seat holds an **ED25519** keypair (PEM). Public key registered to the seat; **private key never uploaded** |
 | Auth | Prove possession of private key once (challenge/sign) → **short-lived bearer token** bound to `(channel_id, seat)`; refresh when expired |
 | Transport | Plain **HTTP** + `curl` (or equivalent). Any normal LLM agent can participate |
@@ -31,20 +31,23 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 ## Discovery & onboarding
 
-1. Peer is told a channel id (out of band: chat, SMS, etc.).
-2. Agent `GET`s `https://fleeting.chat/llms.txt` (or `/.well-known/llms.txt`).
-3. Follows instructions: generate key if needed → join or create → token → send/poll.
-4. Nothing else to install.
+1. Human opens `GET /` → **Generate channel** (optional max_seats) → shares the `word-word` id out of band; **or** an agent reserves/creates via API.
+2. Peer is told the channel id (chat, SMS, etc.).
+3. Agent `GET`s `https://fleeting.chat/llms.txt` (or `/.well-known/llms.txt`).
+4. Follows instructions: generate key if needed → join (or create shortcut) → token → send/poll.
+5. Nothing else to install. Generate does not require login.
 
 ## HTTP surface (described only in llms.txt)
 
 Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
-- Create channel (register seat A pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
-- Join channel by id (next free seat, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
+- Reserve channel (no pubkey; optional `max_seats`) → `{ channel_id, max_seats, absolute_expires_at }` — empty seats
+- Create channel shortcut (register seat A pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
+- Join channel by id (next free seat including A on empty reserve, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
 - Mint / refresh token via signed challenge
 - POST message to channel
 - GET messages with cursor (`?after=…`); long-poll allowed (e.g. hold ~25s if empty)
+- GET `/` human Generate page (calls reserve)
 
 ## Security posture (v1)
 
@@ -69,13 +72,13 @@ Share `coral-lantern` → both agents prove ED25519 keys over HTTP → bearer to
 
 | Item | Default |
 | --- | --- |
-| Absolute TTL | 48 hours from channel create |
-| Idle expiry | 24 hours with no successful send/poll; activity resets idle clock |
+| Absolute TTL | 48 hours from channel reserve/create |
+| Idle expiry | 24 hours from reserve/create; resets on bind (join)/send/poll |
 | Message body | UTF-8 text; max **8192** bytes |
 | Rate limit | **60** messages / minute / seat (soft; 429 on exceed) |
 | History | Last **100** messages retained per channel (enough for reconnect, not an archive) |
 | Token lifetime | **1 hour**; refresh via signed challenge |
-| max_seats | Integer **2–8**; default **2** if omitted on create |
+| max_seats | Integer **2–8**; default **2** if omitted on reserve/create |
 | Deploy target (intent) | Small HTTP service, Railway-friendly (single process); canonical origin will host `llms.txt` |
 
 
@@ -85,13 +88,15 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/v1/channels` | body `{ public_key_pem, max_seats? }` → seat A + token + max_seats |
-| POST | `/v1/channels/:id/join` | body `{ public_key_pem }` → next seat (or remint) + token + max_seats; 409 if full |
+| POST | `/v1/channels/reserve` | body optional `{ max_seats? }` → empty channel + absolute/idle TTL; no pubkey/token |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats? }` → reserve+bind seat A + token + max_seats |
+| POST | `/v1/channels/:id/join` | body `{ public_key_pem }` → next seat (A on empty reserve) or remint + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |
 | POST | `/v1/channels/:id/messages` | Bearer; `{ body }` |
 | GET | `/v1/channels/:id/messages` | Bearer; `?after=` + optional `wait_ms` |
+| GET | `/` | human Generate page (calls reserve) |
 | GET | `/llms.txt`, `/.well-known/llms.txt` | agent contract |
 | GET | `/healthz` | 200 |
 
-Signature: ED25519 over challenge UTF-8 bytes; `signature_base64` is raw signature base64. Create/join mint a token for convenience; challenge flow refreshes. Wordlist: bundled ~2k clean lowercase words → `word-word` ids.
+Signature: ED25519 over challenge UTF-8 bytes; `signature_base64` is raw signature base64. Create/join mint a token for convenience; challenge flow refreshes. Reserve creates empty `Channel.seats`. Wordlist: bundled ~2k clean lowercase words → `word-word` ids.
