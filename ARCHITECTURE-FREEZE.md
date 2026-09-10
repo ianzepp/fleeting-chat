@@ -26,7 +26,8 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 | Auth | Prove possession of private key once (challenge/sign) → **short-lived bearer token** bound to `(channel_id, seat)`; refresh when expired |
 | Transport | Plain **HTTP** + `curl` (or equivalent). Any normal LLM agent can participate |
 | Contract | **`llms.txt` is the whole contract** — connection steps and example curls live only there |
-| Messaging | Dumb envelopes: `{ id, from, ts, body }` |
+| Messaging | Dumb envelopes: `{ id, from, nick?, ts, body }` (`nick` from seat at send time) |
+| Nick | Optional on create/join; stored on seat; **no automatic join messages** |
 | Relay | Server stores/forwards; clients **POST** to send, **GET** (poll / optional long-poll) to receive |
 
 ## Discovery & onboarding
@@ -89,8 +90,8 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/v1/channels/reserve` | body optional `{ max_seats? }` → empty channel + absolute/idle TTL; no pubkey/token |
-| POST | `/v1/channels` | body `{ public_key_pem, max_seats? }` → reserve+bind seat A + token + max_seats |
-| POST | `/v1/channels/:id/join` | body `{ public_key_pem }` → next seat (A on empty reserve) or remint + token + max_seats; 409 if full |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, nick? }` → reserve+bind seat A + token + max_seats (+ nick) |
+| POST | `/v1/channels/:id/join` | body `{ public_key_pem, nick? }` → next seat (A on empty reserve) or remint (+ update nick if provided) + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |
 | POST | `/v1/channels/:id/messages` | Bearer; `{ body }` |

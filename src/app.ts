@@ -15,6 +15,7 @@ import {
   DEFAULT_MAX_SEATS,
   MIN_MAX_SEATS,
   MAX_MAX_SEATS,
+  NICK_MAX_BYTES,
   assignSeats,
   nextSeatLetter,
   normalizeChannelId,
@@ -493,6 +494,31 @@ function parseMaxSeats(raw: unknown): { ok: true; value: number } | { ok: false 
   return { ok: true, value: raw };
 }
 
+/** Optional nick: omit/null/"" → none; else trim, 1–64 UTF-8 bytes. */
+function parseNick(raw: unknown): { ok: true; nick?: string } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true };
+  if (typeof raw !== "string") return { ok: false };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    // "" → no nick; whitespace-only → empty-after-trim → invalid
+    if (raw.length === 0) return { ok: true };
+    return { ok: false };
+  }
+  if (Buffer.byteLength(trimmed, "utf8") > NICK_MAX_BYTES) return { ok: false };
+  return { ok: true, nick: trimmed };
+}
+
+function seatPayload(seat: Seat, tok: { token: string; expiresAt: number }, maxSeats: number, nick?: string) {
+  const out: Record<string, unknown> = {
+    seat,
+    token: tok.token,
+    expires_at: new Date(tok.expiresAt).toISOString(),
+    max_seats: maxSeats,
+  };
+  if (nick !== undefined) out.nick = nick;
+  return out;
+}
+
 function messagesAfter(ch: Channel, after: string | undefined): Message[] {
   if (!after || after === "0" || after === "") return [...ch.messages];
   const idx = ch.messages.findIndex((m) => m.id === after);
@@ -518,12 +544,14 @@ function checkRate(ch: Channel, seat: Seat, now = Date.now()): boolean {
 
 function appendMessage(ch: Channel, from: Seat, body: string): Message {
   const id = `m${ch.nextMsgSeq++}`;
+  const seatNick = ch.seats[from]?.nick;
   const msg: Message = {
     id,
     from,
     ts: new Date().toISOString(),
     body,
   };
+  if (seatNick) msg.nick = seatNick;
   ch.messages.push(msg);
   while (ch.messages.length > MESSAGE_RETAIN) ch.messages.shift();
 
@@ -701,7 +729,7 @@ export function createApp(): Hono {
     const ip = clientIp(c);
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
-    const parsed = await readJsonBody<{ public_key_pem?: string; max_seats?: unknown }>(c);
+    const parsed = await readJsonBody<{ public_key_pem?: string; max_seats?: unknown; nick?: unknown }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
@@ -713,6 +741,8 @@ export function createApp(): Hono {
     }
     const maxParsed = parseMaxSeats(body.max_seats);
     if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
+    const nickParsed = parseNick(body.nick);
+    if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
     const maxSeats = maxParsed.value;
     const now = Date.now();
     let id: string;
@@ -722,6 +752,12 @@ export function createApp(): Hono {
       return jsonError(c, 503, "channel_id_exhausted");
     }
     const pem = normalizePem(body.public_key_pem);
+    const seatA: Channel["seats"]["A"] = {
+      publicKeyPem: pem,
+      rateWindowStart: now,
+      rateCount: 0,
+    };
+    if (nickParsed.nick !== undefined) seatA!.nick = nickParsed.nick;
     const ch: Channel = {
       id,
       createdAt: now,
@@ -729,7 +765,7 @@ export function createApp(): Hono {
       idleExpiresAt: now + IDLE_TTL_MS,
       maxSeats,
       seats: {
-        A: { publicKeyPem: pem, rateWindowStart: now, rateCount: 0 },
+        A: seatA,
       },
       messages: [],
       nextMsgSeq: 1,
@@ -738,14 +774,16 @@ export function createApp(): Hono {
     store.channels.set(id, ch);
     const tok = mintToken(id, "A", now);
     setApiSecurityHeaders(c);
-    return c.json({
+    const resp: Record<string, unknown> = {
       channel_id: id,
       seat: "A",
       token: tok.token,
       expires_at: new Date(tok.expiresAt).toISOString(),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
       max_seats: maxSeats,
-    });
+    };
+    if (nickParsed.nick !== undefined) resp.nick = nickParsed.nick;
+    return c.json(resp);
   });
 
   // Join channel → next free seat (B, C, …) or remint existing seat
@@ -760,7 +798,7 @@ export function createApp(): Hono {
     const id = normalizeChannelId(idRaw);
     if (!id) return jsonError(c, 400, "invalid_channel_id");
 
-    const parsed = await readJsonBody<{ public_key_pem?: string }>(c);
+    const parsed = await readJsonBody<{ public_key_pem?: string; nick?: unknown }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
@@ -773,32 +811,40 @@ export function createApp(): Hono {
     if (!isValidEd25519PublicPem(body.public_key_pem)) {
       return jsonError(c, 400, "invalid_public_key_pem");
     }
+    const nickParsed = parseNick(body.nick);
+    if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
     const pem = normalizePem(body.public_key_pem);
     const existing = seatForPubkey(ch, pem);
     if (existing) {
+      const seatState = ch.seats[existing]!;
+      // Idempotent re-join: if new nick provided, update stored nick; remint token
+      if (body.nick !== undefined && body.nick !== null) {
+        if (nickParsed.nick !== undefined) {
+          seatState.nick = nickParsed.nick;
+        } else {
+          // explicit empty string → clear nick
+          delete seatState.nick;
+        }
+      }
       const tok = mintToken(id, existing);
       store.touchIdle(ch);
       setApiSecurityHeaders(c);
-      return c.json({
-        seat: existing,
-        token: tok.token,
-        expires_at: new Date(tok.expiresAt).toISOString(),
-        max_seats: ch.maxSeats,
-      });
+      return c.json(seatPayload(existing, tok, ch.maxSeats, seatState.nick));
     }
     const seat = nextSeatLetter(ch);
     if (!seat) return jsonError(c, 409, "channel_full");
     const now = Date.now();
-    ch.seats[seat] = { publicKeyPem: pem, rateWindowStart: now, rateCount: 0 };
+    const seatState: NonNullable<Channel["seats"][Seat]> = {
+      publicKeyPem: pem,
+      rateWindowStart: now,
+      rateCount: 0,
+    };
+    if (nickParsed.nick !== undefined) seatState.nick = nickParsed.nick;
+    ch.seats[seat] = seatState;
     store.touchIdle(ch, now);
     const tok = mintToken(id, seat, now);
     setApiSecurityHeaders(c);
-    return c.json({
-      seat,
-      token: tok.token,
-      expires_at: new Date(tok.expiresAt).toISOString(),
-      max_seats: ch.maxSeats,
-    });
+    return c.json(seatPayload(seat, tok, ch.maxSeats, seatState.nick));
   });
 
   // Auth challenge

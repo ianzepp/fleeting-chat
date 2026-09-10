@@ -30,12 +30,16 @@ export function occupiedSeatCount(ch: Channel): number {
 export interface Message {
   id: string;
   from: Seat;
+  /** Copied from seat.nick at send time when set; omitted when seat has no nick. */
+  nick?: string;
   ts: string; // ISO-8601
   body: string;
 }
 
 export interface SeatState {
   publicKeyPem: string;
+  /** Optional display label set on create/join; peers see it on message envelopes. */
+  nick?: string;
   rateWindowStart: number;
   rateCount: number;
 }
@@ -82,6 +86,7 @@ export const ABSOLUTE_TTL_MS = 48 * 60 * 60 * 1000;
 export const IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 export const TOKEN_TTL_MS = 60 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+export const NICK_MAX_BYTES = 64;
 export const BODY_MAX_BYTES = 8192;
 export const RAW_BODY_MAX_BYTES = 32 * 1024;
 export const RATE_LIMIT_PER_MIN = 60;

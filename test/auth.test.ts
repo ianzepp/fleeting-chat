@@ -610,6 +610,180 @@ describe("fleeting.chat spike", () => {
     assert.ok(store.usedChannelIds.has(create.body.channel_id as string));
   });
 
+
+  it("nick on create/join echoed; messages include nick; remint updates nick", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "  alice  " }),
+    });
+    assert.equal(create.status, 200);
+    assert.equal(create.body.nick, "alice");
+    const channelId = create.body.channel_id as string;
+    const tokenA = create.body.token as string;
+
+    const join = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem, nick: "bob" }),
+    });
+    assert.equal(join.status, 200);
+    assert.equal(join.body.seat, "B");
+    assert.equal(join.body.nick, "bob");
+    const tokenB = join.body.token as string;
+
+    const sendA = await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenA}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "hi from alice" }),
+    });
+    assert.equal(sendA.status, 201);
+    assert.equal(sendA.body.message.from, "A");
+    assert.equal(sendA.body.message.nick, "alice");
+    assert.equal(sendA.body.message.body, "hi from alice");
+
+    const sendB = await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenB}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "hi from bob" }),
+    });
+    assert.equal(sendB.status, 201);
+    assert.equal(sendB.body.message.nick, "bob");
+
+    const poll = await json(app, `/v1/channels/${channelId}/messages?after=0`, {
+      headers: { Authorization: `Bearer ${tokenB}` },
+    });
+    assert.equal(poll.status, 200);
+    assert.equal(poll.body.messages.length, 2);
+    assert.equal(poll.body.messages[0].nick, "alice");
+    assert.equal(poll.body.messages[1].nick, "bob");
+
+    // remint with new nick updates stored nick
+    const rejoin = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "alice2" }),
+    });
+    assert.equal(rejoin.status, 200);
+    assert.equal(rejoin.body.seat, "A");
+    assert.equal(rejoin.body.nick, "alice2");
+    assert.notEqual(rejoin.body.token, tokenA);
+
+    const sendA2 = await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${rejoin.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "renamed" }),
+    });
+    assert.equal(sendA2.status, 201);
+    assert.equal(sendA2.body.message.nick, "alice2");
+  });
+
+  it("invalid nick length and empty-after-trim rejected", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+
+    const tooLong = "x".repeat(65);
+    const longCreate = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: tooLong }),
+    });
+    assert.equal(longCreate.status, 400);
+    assert.equal(longCreate.body.error, "invalid_nick");
+
+    const wsOnly = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "   " }),
+    });
+    assert.equal(wsOnly.status, 400);
+    assert.equal(wsOnly.body.error, "invalid_nick");
+
+    const badType = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: 123 }),
+    });
+    assert.equal(badType.status, 400);
+    assert.equal(badType.body.error, "invalid_nick");
+
+    // empty string / null / omit → no nick (ok)
+    const empty = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "" }),
+    });
+    assert.equal(empty.status, 200);
+    assert.equal(empty.body.nick, undefined);
+
+    const nullNick = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: ed25519PemPair().publicPem, nick: null }),
+    });
+    assert.equal(nullNick.status, 200);
+    assert.equal(nullNick.body.nick, undefined);
+
+    // 64-byte nick ok
+    const maxOk = "y".repeat(64);
+    const ok64 = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: ed25519PemPair().publicPem, nick: maxOk }),
+    });
+    assert.equal(ok64.status, 200);
+    assert.equal(ok64.body.nick, maxOk);
+
+    // join invalid nick
+    const channelId = empty.body.channel_id as string;
+    const joinBad = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: ed25519PemPair().publicPem, nick: tooLong }),
+    });
+    assert.equal(joinBad.status, 400);
+    assert.equal(joinBad.body.error, "invalid_nick");
+  });
+
+  it("message without seat nick omits nick field", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(create.status, 200);
+    assert.equal(create.body.nick, undefined);
+    const send = await json(app, `/v1/channels/${create.body.channel_id}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${create.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "anon" }),
+    });
+    assert.equal(send.status, 201);
+    assert.equal(send.body.message.from, "A");
+    assert.equal(send.body.message.nick, undefined);
+  });
+
   it("ip rate limit returns 429 without being flaky", async () => {
     freshStore();
     const app = createApp();
