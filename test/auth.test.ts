@@ -8,6 +8,8 @@ function freshStore() {
   store.channels.clear();
   store.tokens.clear();
   store.challenges.clear();
+  store.agentTokens.clear();
+  store.agentChallenges.clear();
   store.usedChannelIds.clear();
   store.ipRate.clear();
 }
@@ -24,6 +26,34 @@ async function json(app: ReturnType<typeof createApp>, path: string, init?: Requ
   const res = await app.request(path, init);
   const body = await res.json();
   return { status: res.status, body, headers: res.headers };
+}
+
+async function mintAgentTokenViaApi(
+  app: ReturnType<typeof createApp>,
+  pair: ReturnType<typeof ed25519PemPair>
+) {
+  const ch = await json(app, "/v1/auth/agent/challenge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ public_key_pem: pair.publicPem }),
+  });
+  assert.equal(ch.status, 200);
+  const challenge = ch.body.challenge as string;
+  const sig = sign(null, Buffer.from(challenge, "utf8"), pair.privateKey).toString("base64");
+  const tok = await json(app, "/v1/auth/agent/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      public_key_pem: pair.publicPem,
+      challenge,
+      signature_base64: sig,
+    }),
+  });
+  assert.equal(tok.status, 200);
+  assert.ok(tok.body.token);
+  assert.ok(tok.body.expires_at);
+  assert.equal(tok.body.seat, undefined);
+  return tok.body.token as string;
 }
 
 describe("fleeting.chat spike", () => {
@@ -1009,6 +1039,179 @@ describe("fleeting.chat spike", () => {
       headers: {},
     });
     assert.equal(getNoAuth.status, 401);
+  });
+
+  it("agent auth mint + ping lists only channels with activity after since", async () => {
+    freshStore();
+    const app = createApp();
+    const agent = ed25519PemPair();
+    const other = ed25519PemPair();
+
+    // Two channels with the same agent pubkey as seat A
+    const c1 = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: agent.publicPem }),
+    });
+    assert.equal(c1.status, 200);
+    const id1 = c1.body.channel_id as string;
+    const token1 = c1.body.token as string;
+
+    const c2 = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: agent.publicPem }),
+    });
+    assert.equal(c2.status, 200);
+    const id2 = c2.body.channel_id as string;
+
+    // Join other key on c1 so channel is usable; not needed for ping filter
+    await json(app, `/v1/channels/${id1}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: other.publicPem }),
+    });
+
+    const since = new Date().toISOString();
+    // Small delay so message ts is strictly after since
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Activity only in channel 1
+    const send = await json(app, `/v1/channels/${id1}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token1}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "activity" }),
+    });
+    assert.equal(send.status, 201);
+
+    const agentToken = await mintAgentTokenViaApi(app, agent);
+
+    const ping = await json(app, "/v1/ping", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ since }),
+    });
+    assert.equal(ping.status, 200);
+    assert.deepEqual(Object.keys(ping.body).sort(), ["channels"]);
+    assert.deepEqual(ping.body.channels, [id1].sort());
+    assert.ok(!ping.body.channels.includes(id2));
+  });
+
+  it("ping rejects channel token with agent_token_required", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(create.status, 200);
+    const ping = await json(app, "/v1/ping", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${create.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ since: new Date().toISOString() }),
+    });
+    assert.equal(ping.status, 403);
+    assert.equal(ping.body.error, "agent_token_required");
+  });
+
+  it("ping rejects bad/missing since", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const agentToken = await mintAgentTokenViaApi(app, a);
+
+    for (const body of [{}, { since: "" }, { since: "not-a-date" }, { since: 123 }]) {
+      const ping = await json(app, "/v1/ping", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agentToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      assert.equal(ping.status, 400, JSON.stringify(body));
+      assert.equal(ping.body.error, "invalid_since");
+    }
+  });
+
+  it("ping returns empty list when no seats or no new content", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const agentToken = await mintAgentTokenViaApi(app, a);
+
+    const empty = await json(app, "/v1/ping", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ since: "2000-01-01T00:00:00.000Z" }),
+    });
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.body, { channels: [] });
+
+    // Seat held but no activity after a future since
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(create.status, 200);
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const none = await json(app, "/v1/ping", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ since: future }),
+    });
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.body, { channels: [] });
+  });
+
+  it("agent challenge replay fails", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const ch = await json(app, "/v1/auth/agent/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(ch.status, 200);
+    const challenge = ch.body.challenge as string;
+    const sig = sign(null, Buffer.from(challenge, "utf8"), a.privateKey).toString("base64");
+    const payload = {
+      public_key_pem: a.publicPem,
+      challenge,
+      signature_base64: sig,
+    };
+    const first = await json(app, "/v1/auth/agent/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(first.status, 200);
+    const replay = await json(app, "/v1/auth/agent/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(replay.status, 401);
+    assert.equal(replay.body.error, "invalid_or_expired_challenge");
   });
 
 });

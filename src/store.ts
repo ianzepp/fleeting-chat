@@ -48,6 +48,8 @@ export interface ChannelFile {
   filename: string;
   contentType: string;
   bytes: Buffer;
+  /** Upload / create time (ms); used by agent ping "new content". */
+  createdAt: number;
   expiresAt: number;
   seat: Seat;
 }
@@ -83,6 +85,20 @@ export interface TokenRecord {
 export interface ChallengeRecord {
   challenge: string;
   channelId: string;
+  publicKeyPem: string;
+  expiresAt: number;
+}
+
+/** Pubkey-scoped bearer (not bound to a channel/seat). */
+export interface AgentTokenRecord {
+  token: string;
+  publicKeyPem: string;
+  expiresAt: number;
+}
+
+/** Challenge for agent (pubkey-scoped) auth — no channel. */
+export interface AgentChallengeRecord {
+  challenge: string;
   publicKeyPem: string;
   expiresAt: number;
 }
@@ -132,6 +148,8 @@ export class Store {
   channels = new Map<string, Channel>();
   tokens = new Map<string, TokenRecord>();
   challenges = new Map<string, ChallengeRecord>();
+  agentTokens = new Map<string, AgentTokenRecord>();
+  agentChallenges = new Map<string, AgentChallengeRecord>();
   usedChannelIds = new Set<string>();
   /** create + join + auth endpoints per IP */
   ipRate = new Map<string, IpRateWindow>();
@@ -205,6 +223,12 @@ export class Store {
     }
     for (const [cid, rec] of this.challenges) {
       if (now >= rec.expiresAt) this.challenges.delete(cid);
+    }
+    for (const [tok, rec] of this.agentTokens) {
+      if (now >= rec.expiresAt) this.agentTokens.delete(tok);
+    }
+    for (const [cid, rec] of this.agentChallenges) {
+      if (now >= rec.expiresAt) this.agentChallenges.delete(cid);
     }
     for (const [ip, win] of this.ipRate) {
       if (now - win.start >= 60_000) this.ipRate.delete(ip);

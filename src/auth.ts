@@ -5,6 +5,7 @@ import {
   CHALLENGE_TTL_MS,
   type Seat,
   type TokenRecord,
+  type AgentTokenRecord,
 } from "./store.js";
 
 /** Normalize PEM: trim and ensure trailing newline. */
@@ -101,6 +102,60 @@ export function resolveBearer(authHeader: string | undefined): TokenRecord | nul
   if (!rec) return null;
   if (Date.now() >= rec.expiresAt) {
     store.tokens.delete(m[1]);
+    return null;
+  }
+  return rec;
+}
+
+export function mintAgentToken(publicKeyPem: string, now = Date.now()): AgentTokenRecord {
+  const token = randomBytes(32).toString("base64url");
+  const rec: AgentTokenRecord = {
+    token,
+    publicKeyPem: normalizePem(publicKeyPem),
+    expiresAt: now + TOKEN_TTL_MS,
+  };
+  store.agentTokens.set(token, rec);
+  return rec;
+}
+
+export function createAgentChallenge(
+  publicKeyPem: string,
+  now = Date.now()
+): { challenge: string; expires_at: string } {
+  const challenge = `fleeting:agent:${now}:${randomBytes(24).toString("base64url")}`;
+  const expiresAt = now + CHALLENGE_TTL_MS;
+  store.agentChallenges.set(challenge, {
+    challenge,
+    publicKeyPem: normalizePem(publicKeyPem),
+    expiresAt,
+  });
+  return { challenge, expires_at: new Date(expiresAt).toISOString() };
+}
+
+export function consumeAgentChallenge(challenge: string, publicKeyPem: string): boolean {
+  const rec = store.agentChallenges.get(challenge);
+  if (!rec) return false;
+  if (Date.now() >= rec.expiresAt) {
+    store.agentChallenges.delete(challenge);
+    return false;
+  }
+  if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
+  store.agentChallenges.delete(challenge);
+  return true;
+}
+
+/**
+ * Resolve Bearer as an agent (pubkey-scoped) token.
+ * Channel tokens are not returned here.
+ */
+export function resolveAgentBearer(authHeader: string | undefined): AgentTokenRecord | null {
+  if (!authHeader) return null;
+  const m = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
+  if (!m) return null;
+  const rec = store.agentTokens.get(m[1]);
+  if (!rec) return null;
+  if (Date.now() >= rec.expiresAt) {
+    store.agentTokens.delete(m[1]);
     return null;
   }
   return rec;

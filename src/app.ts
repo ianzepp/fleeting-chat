@@ -40,6 +40,10 @@ import {
   createChallenge,
   consumeChallenge,
   resolveBearer,
+  mintAgentToken,
+  createAgentChallenge,
+  consumeAgentChallenge,
+  resolveAgentBearer,
 } from "./auth.js";
 import { generateChannelId } from "./ids.js";
 
@@ -968,6 +972,137 @@ export function createApp(): Hono {
     });
   });
 
+  // Agent auth challenge (pubkey-scoped, no channel)
+  app.post("/v1/auth/agent/challenge", async (c) => {
+    store.sweep();
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const ip = clientIp(c);
+    if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
+
+    const parsed = await readJsonBody<{ public_key_pem?: string }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    if (!body.public_key_pem || typeof body.public_key_pem !== "string") {
+      return jsonError(c, 400, "missing_public_key_pem");
+    }
+    if (!isValidEd25519PublicPem(body.public_key_pem)) {
+      return jsonError(c, 400, "invalid_public_key_pem", "expected ED25519 public key PEM");
+    }
+    const { challenge, expires_at } = createAgentChallenge(body.public_key_pem);
+    setApiSecurityHeaders(c);
+    return c.json({ challenge, expires_at });
+  });
+
+  // Agent auth token (pubkey-scoped bearer)
+  app.post("/v1/auth/agent/token", async (c) => {
+    store.sweep();
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const ip = clientIp(c);
+    if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
+
+    const parsed = await readJsonBody<{
+      public_key_pem?: string;
+      challenge?: string;
+      signature_base64?: string;
+    }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    if (!body.public_key_pem || !body.challenge || !body.signature_base64) {
+      return jsonError(c, 400, "missing_fields");
+    }
+    if (typeof body.public_key_pem !== "string") {
+      return jsonError(c, 400, "invalid_public_key_pem");
+    }
+    if (!isValidEd25519PublicPem(body.public_key_pem)) {
+      return jsonError(c, 400, "invalid_public_key_pem");
+    }
+    if (typeof body.challenge !== "string" || typeof body.signature_base64 !== "string") {
+      return jsonError(c, 400, "missing_fields");
+    }
+    if (!consumeAgentChallenge(body.challenge, body.public_key_pem)) {
+      return jsonError(c, 401, "invalid_or_expired_challenge");
+    }
+    if (!verifyEd25519Signature(body.public_key_pem, body.challenge, body.signature_base64)) {
+      return jsonError(c, 401, "invalid_signature");
+    }
+    const tok = mintAgentToken(body.public_key_pem);
+    setApiSecurityHeaders(c);
+    return c.json({
+      token: tok.token,
+      expires_at: new Date(tok.expiresAt).toISOString(),
+    });
+  });
+
+  // Agent ping: channels with this pubkey that have new content since `since`
+  app.post("/v1/ping", async (c) => {
+    store.sweep();
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+
+    const agentTok = resolveAgentBearer(c.req.header("Authorization"));
+    if (!agentTok) {
+      const channelTok = resolveBearer(c.req.header("Authorization"));
+      if (channelTok) return jsonError(c, 403, "agent_token_required");
+      return jsonError(c, 401, "unauthorized");
+    }
+
+    const parsed = await readJsonBody<{ since?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    if (typeof body.since !== "string" || !body.since.trim()) {
+      return jsonError(c, 400, "invalid_since");
+    }
+    const sinceMs = Date.parse(body.since);
+    if (Number.isNaN(sinceMs)) {
+      return jsonError(c, 400, "invalid_since");
+    }
+
+    const pem = normalizePem(agentTok.publicKeyPem);
+    const hits: string[] = [];
+
+    for (const [id, ch] of store.channels) {
+      if (store.isExpired(ch)) continue;
+      store.sweepChannelFiles(ch);
+
+      let holdsSeat = false;
+      for (const seat of assignSeats(ch.maxSeats)) {
+        const s = ch.seats[seat];
+        if (s && normalizePem(s.publicKeyPem) === pem) {
+          holdsSeat = true;
+          break;
+        }
+      }
+      if (!holdsSeat) continue;
+
+      let hasNew = false;
+      for (const msg of ch.messages) {
+        const ts = Date.parse(msg.ts);
+        if (!Number.isNaN(ts) && ts > sinceMs) {
+          hasNew = true;
+          break;
+        }
+      }
+      if (!hasNew) {
+        for (const f of ch.files.values()) {
+          if (f.createdAt > sinceMs) {
+            hasNew = true;
+            break;
+          }
+        }
+      }
+      if (hasNew) hits.push(id);
+    }
+
+    hits.sort();
+    setApiSecurityHeaders(c);
+    return c.json({ channels: hits });
+  });
+
   // Send message
   app.post("/v1/channels/:id/messages", async (c) => {
     store.sweep();
@@ -1127,6 +1262,7 @@ export function createApp(): Hono {
       filename: body.filename,
       contentType,
       bytes: decoded,
+      createdAt: now,
       expiresAt,
       seat: tok.seat,
     };
