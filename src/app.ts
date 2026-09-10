@@ -17,7 +17,7 @@ import {
   MAX_MAX_SEATS,
   assignSeats,
   nextSeatLetter,
-  isValidChannelId,
+  normalizeChannelId,
   type Channel,
   type Message,
   type Seat,
@@ -198,9 +198,10 @@ const LANDING_HTML = `<!DOCTYPE html>
       color: var(--muted);
     }
     #channel {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: clamp(1.6rem, 5vw, 2.35rem);
       font-weight: 700;
-      letter-spacing: 0.03em;
+      letter-spacing: 0.12em;
       line-height: 1.15;
       word-break: break-all;
       background: rgba(110, 168, 255, 0.08);
@@ -263,7 +264,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 
   <main>
     <section class="stage" aria-label="Channel generator">
-      <p class="lede">Mint a <code>word-word</code> room. Give it to your agent and the other person — agents bind seats over plain HTTP.</p>
+      <p class="lede">Mint a <code>NNN-NNN-NNN</code> digit code. Give it to your agent and the other person — agents bind seats over plain HTTP.</p>
       <div class="controls">
         <label for="maxSeats">Max seats
           <select id="maxSeats" aria-label="Max seats">
@@ -736,8 +737,9 @@ export function createApp(): Hono {
     const ip = clientIp(c);
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
-    const id = c.req.param("id");
-    if (!isValidChannelId(id)) return jsonError(c, 400, "invalid_channel_id");
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
 
     const parsed = await readJsonBody<{ public_key_pem?: string }>(c);
     if (!parsed.ok) return parsed.response;
@@ -795,17 +797,19 @@ export function createApp(): Hono {
     if (!body.channel_id || !body.public_key_pem) {
       return jsonError(c, 400, "missing_fields");
     }
-    if (typeof body.channel_id !== "string" || !isValidChannelId(body.channel_id)) {
+    if (typeof body.channel_id !== "string") {
       return jsonError(c, 400, "invalid_channel_id");
     }
+    const channelId = normalizeChannelId(body.channel_id);
+    if (!channelId) return jsonError(c, 400, "invalid_channel_id");
     if (!isValidEd25519PublicPem(body.public_key_pem)) {
       return jsonError(c, 400, "invalid_public_key_pem");
     }
-    const ch = store.getChannel(body.channel_id);
+    const ch = store.getChannel(channelId);
     if (!ch) return jsonError(c, 404, "channel_not_found");
     const seat = seatForPubkey(ch, body.public_key_pem);
     if (!seat) return jsonError(c, 403, "public_key_not_registered");
-    const { challenge, expires_at } = createChallenge(body.channel_id, body.public_key_pem);
+    const { challenge, expires_at } = createChallenge(channelId, body.public_key_pem);
     setApiSecurityHeaders(c);
     return c.json({ challenge, expires_at });
   });
@@ -830,23 +834,25 @@ export function createApp(): Hono {
     if (!body.channel_id || !body.public_key_pem || !body.challenge || !body.signature_base64) {
       return jsonError(c, 400, "missing_fields");
     }
-    if (typeof body.channel_id !== "string" || !isValidChannelId(body.channel_id)) {
+    if (typeof body.channel_id !== "string") {
       return jsonError(c, 400, "invalid_channel_id");
     }
+    const channelId = normalizeChannelId(body.channel_id);
+    if (!channelId) return jsonError(c, 400, "invalid_channel_id");
     if (!isValidEd25519PublicPem(body.public_key_pem)) {
       return jsonError(c, 400, "invalid_public_key_pem");
     }
-    const ch = store.getChannel(body.channel_id);
+    const ch = store.getChannel(channelId);
     if (!ch) return jsonError(c, 404, "channel_not_found");
     const seat = seatForPubkey(ch, body.public_key_pem);
     if (!seat) return jsonError(c, 403, "public_key_not_registered");
-    if (!consumeChallenge(body.challenge, body.channel_id, body.public_key_pem)) {
+    if (!consumeChallenge(body.challenge, channelId, body.public_key_pem)) {
       return jsonError(c, 401, "invalid_or_expired_challenge");
     }
     if (!verifyEd25519Signature(body.public_key_pem, body.challenge, body.signature_base64)) {
       return jsonError(c, 401, "invalid_signature");
     }
-    const tok = mintToken(body.channel_id, seat);
+    const tok = mintToken(channelId, seat);
     store.touchIdle(ch);
     setApiSecurityHeaders(c);
     return c.json({
@@ -862,8 +868,9 @@ export function createApp(): Hono {
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
 
-    const id = c.req.param("id");
-    if (!isValidChannelId(id)) return jsonError(c, 400, "invalid_channel_id");
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
 
     const tok = resolveBearer(c.req.header("Authorization"));
     if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
@@ -891,8 +898,9 @@ export function createApp(): Hono {
   // Poll messages (optional long-poll)
   app.get("/v1/channels/:id/messages", async (c) => {
     store.sweep();
-    const id = c.req.param("id");
-    if (!isValidChannelId(id)) return jsonError(c, 400, "invalid_channel_id");
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
 
     const tok = resolveBearer(c.req.header("Authorization"));
     if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");

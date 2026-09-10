@@ -90,10 +90,19 @@ export const MESSAGE_RETAIN = 100;
 export const DEFAULT_LONG_POLL_MS = 25_000;
 export const MAX_LONG_POLL_MS = 30_000;
 
-export const CHANNEL_ID_RE = /^[a-z]+-[a-z]+$/;
+export const CHANNEL_ID_RE = /^\d{3}-\d{3}-\d{3}$/;
+
+/** Accept canonical NNN-NNN-NNN or any input with exactly 9 digits (dashes optional). */
+export function normalizeChannelId(input: string): string | null {
+  const trimmed = input.trim();
+  if (CHANNEL_ID_RE.test(trimmed)) return trimmed;
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length !== 9) return null;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
+}
 
 export function isValidChannelId(id: string): boolean {
-  return CHANNEL_ID_RE.test(id);
+  return normalizeChannelId(id) !== null;
 }
 
 export class Store {

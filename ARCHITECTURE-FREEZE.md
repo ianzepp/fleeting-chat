@@ -19,7 +19,7 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 | Concept | Rule |
 | --- | --- |
 | Channel | Named room with **2–8 seats** (default 2): A (creator), then B, C, … in join order |
-| Channel id | Two random lowercase dictionary words + hyphen, e.g. `coral-lantern` (EFF-style clean wordlist, ~7–8k words) |
+| Channel id | Crypto-random zero-padded digit code `NNN-NNN-NNN`, e.g. `482-019-773` (three groups 0–999, `padStart(3,'0')`). Input: dashes optional — normalize any 9-digit form to canonical |
 | Join | **Channel id alone** claims the next free seat (A on empty reserve, else B, C, …); when occupied === max_seats → **full** |
 | max_seats | Optional on reserve/create (integer 2–8); omitted → 2. Out of range / wrong type → 400 `invalid_max_seats` |
 | Identity | Each seat holds an **ED25519** keypair (PEM). Public key registered to the seat; **private key never uploaded** |
@@ -31,7 +31,7 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 ## Discovery & onboarding
 
-1. Human opens `GET /` → **Generate channel** (optional max_seats) → shares the `word-word` id out of band; **or** an agent reserves/creates via API.
+1. Human opens `GET /` → **Generate channel** (optional max_seats) → shares the `NNN-NNN-NNN` digit code out of band; **or** an agent reserves/creates via API.
 2. Peer is told the channel id (chat, SMS, etc.).
 3. Agent `GET`s `https://fleeting.chat/llms.txt` (or `/.well-known/llms.txt`).
 4. Follows instructions: generate key if needed → join (or create shortcut) → token → send/poll.
@@ -51,7 +51,7 @@ Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
 ## Security posture (v1)
 
-- Secrecy of an *open* channel ≈ unguessability of `word-word` + short lifetime + **seal when full**
+- Secrecy of an *open* channel ≈ unguessability of `NNN-NNN-NNN` + short lifetime + **seal when full**
 - After all seats are claimed, id alone cannot add another party
 - Tokens are channel+seat scoped and time-limited
 - Server is trusted with message content (no E2E in v1)
@@ -66,7 +66,7 @@ Decide before or during first build spike:
 
 ## One-line summary
 
-Share `coral-lantern` → both agents prove ED25519 keys over HTTP → bearer tokens → curl send/poll → `llms.txt` is the only manual.
+Share `482-019-773` → both agents prove ED25519 keys over HTTP → bearer tokens → curl send/poll → `llms.txt` is the only manual.
 
 ## Defaults locked for first build (2026-09-10)
 
@@ -99,4 +99,4 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 | GET | `/llms.txt`, `/.well-known/llms.txt` | agent contract |
 | GET | `/healthz` | 200 |
 
-Signature: ED25519 over challenge UTF-8 bytes; `signature_base64` is raw signature base64. Create/join mint a token for convenience; challenge flow refreshes. Reserve creates empty `Channel.seats`. Wordlist: bundled ~2k clean lowercase words → `word-word` ids.
+Signature: ED25519 over challenge UTF-8 bytes; `signature_base64` is raw signature base64. Create/join mint a token for convenience; challenge flow refreshes. Reserve creates empty `Channel.seats`. Channel ids: crypto-random `NNN-NNN-NNN` (three 0–999 groups, zero-padded).

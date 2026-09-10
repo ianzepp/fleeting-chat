@@ -41,7 +41,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(create.status, 200);
     assert.equal(create.body.seat, "A");
     assert.equal(create.body.max_seats, 2);
-    assert.match(create.body.channel_id, /^[a-z]+-[a-z]+$/);
+    assert.match(create.body.channel_id, /^\d{3}-\d{3}-\d{3}$/);
     const channelId = create.body.channel_id as string;
     const tokenA = create.body.token as string;
 
@@ -283,7 +283,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({}),
     });
     assert.equal(reserve.status, 200);
-    assert.match(reserve.body.channel_id, /^[a-z]+-[a-z]+$/);
+    assert.match(reserve.body.channel_id, /^\d{3}-\d{3}-\d{3}$/);
     assert.equal(reserve.body.max_seats, 2);
     assert.ok(reserve.body.absolute_expires_at);
     assert.equal(reserve.body.seat, undefined);
@@ -429,25 +429,119 @@ describe("fleeting.chat spike", () => {
     freshStore();
     const app = createApp();
     const a = ed25519PemPair();
-    const join = await json(app, "/v1/channels/NOT-VALID/join", {
+    for (const bad of ["NOT-VALID", "coral-lantern", "12-345-678", "bad_id"]) {
+      const join = await json(app, `/v1/channels/${bad}/join`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_key_pem: a.publicPem }),
+      });
+      assert.equal(join.status, 400, `join ${bad}`);
+      assert.equal(join.body.error, "invalid_channel_id");
+
+      const ch = await json(app, "/v1/auth/challenge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel_id: bad,
+          public_key_pem: a.publicPem,
+        }),
+      });
+      assert.equal(ch.status, 400, `challenge ${bad}`);
+      assert.equal(ch.body.error, "invalid_channel_id");
+    }
+  });
+
+  it("valid join path with generated digit channel id", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const reserve = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(reserve.status, 200);
+    assert.match(reserve.body.channel_id, /^\d{3}-\d{3}-\d{3}$/);
+    const channelId = reserve.body.channel_id as string;
+
+    const joinA = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
-    assert.equal(join.status, 400);
-    assert.equal(join.body.error, "invalid_channel_id");
+    assert.equal(joinA.status, 200);
+    assert.equal(joinA.body.seat, "A");
 
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+    assert.equal(joinB.body.seat, "B");
+  });
+
+  it("join accepts undashed 9-digit form same as canonical", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const reserve = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(reserve.status, 200);
+    const channelId = reserve.body.channel_id as string;
+    assert.match(channelId, /^\d{3}-\d{3}-\d{3}$/);
+    const undashed = channelId.replace(/-/g, "");
+    assert.equal(undashed.length, 9);
+
+    const joinA = await json(app, `/v1/channels/${undashed}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(joinA.status, 200);
+    assert.equal(joinA.body.seat, "A");
+
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+    assert.equal(joinB.body.seat, "B");
+
+    // auth challenge also accepts undashed
     const ch = await json(app, "/v1/auth/challenge", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        channel_id: "bad_id",
+        channel_id: undashed,
         public_key_pem: a.publicPem,
       }),
     });
-    assert.equal(ch.status, 400);
-    assert.equal(ch.body.error, "invalid_channel_id");
+    assert.equal(ch.status, 200);
+    assert.ok(ch.body.challenge);
   });
+
+  it("normalize rejects wrong digit counts and word-word", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    for (const bad of ["coral-lantern", "12-345-678", "12345678", "1234567890", "abc"]) {
+      const join = await json(app, `/v1/channels/${encodeURIComponent(bad)}/join`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_key_pem: a.publicPem }),
+      });
+      assert.equal(join.status, 400, bad);
+      assert.equal(join.body.error, "invalid_channel_id");
+    }
+  });
+
 
   it("rejects unsupported media type", async () => {
     freshStore();
