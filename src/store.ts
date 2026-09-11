@@ -134,6 +134,9 @@ export const FILE_DEFAULT_TTL_SECONDS = 3600;
 export const FILE_MIN_TTL_SECONDS = 1;
 export const FILE_MAX_TTL_SECONDS = 86_400;
 export const FILE_FILENAME_MAX = 128;
+/** Media types are metadata, not payload: the value is echoed to peers and
+ *  persisted, so it is capped instead of accepting the whole raw body. */
+export const CONTENT_TYPE_MAX_BYTES = 256;
 export const RATE_LIMIT_PER_MIN = 60;
 export const IP_RATE_LIMIT_PER_MIN = 30;
 export const MESSAGE_RETAIN = 100;

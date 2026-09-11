@@ -18,6 +18,7 @@ import {
   FILE_MIN_TTL_SECONDS,
   FILE_MAX_TTL_SECONDS,
   FILE_FILENAME_MAX,
+  CONTENT_TYPE_MAX_BYTES,
   RATE_LIMIT_PER_MIN,
   MESSAGE_RETAIN,
   DEFAULT_LONG_POLL_MS,
@@ -1094,6 +1095,27 @@ function channelDeadlines(now: number, ttlMs: number | undefined) {
   };
 }
 
+/** C0/C1 controls and DEL. Filenames travel into JSON, logs, and peers'
+ *  terminals, so CR/LF/ESC must not survive validation. */
+function hasControlChars(s: string): boolean {
+  return /[\u0000-\u001f\u007f-\u009f]/.test(s);
+}
+
+/** Single-line `type/subtype` with optional parameters, bounded in length. */
+const MEDIA_TYPE_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\/[!#$%&'*+\-.^_`|~0-9A-Za-z]+(?:\s*;.*)?$/;
+
+/** Optional media type on upload. Omit/null → the generic binary type. The value
+ *  is echoed to peers and persisted, so it stays bounded metadata rather than
+ *  free text that could consume the request budget. */
+function parseContentType(raw: unknown): { ok: true; value: string } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true, value: "application/octet-stream" };
+  if (typeof raw !== "string") return { ok: false };
+  const trimmed = raw.trim();
+  if (!trimmed || !MEDIA_TYPE_RE.test(trimmed)) return { ok: false };
+  if (Buffer.byteLength(trimmed, "utf8") > CONTENT_TYPE_MAX_BYTES) return { ok: false };
+  return { ok: true, value: trimmed };
+}
+
 /** Optional nick: omit/null/"" → none; else trim, 1–64 UTF-8 bytes. */
 function parseNick(raw: unknown): { ok: true; nick?: string } | { ok: false } {
   if (raw === undefined || raw === null) return { ok: true };
@@ -1198,7 +1220,7 @@ function clearWaiter(
 function isValidFilename(name: string): boolean {
   if (name.length < 1 || name.length > FILE_FILENAME_MAX) return false;
   if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
-  return true;
+  return !hasControlChars(name);
 }
 
 function decodeContentBase64(raw: string): Buffer | null {
@@ -1932,13 +1954,8 @@ export function createApp(): Hono {
     if (typeof body.filename !== "string" || !isValidFilename(body.filename)) {
       return jsonError(c, 400, "invalid_filename");
     }
-    let contentType = "application/octet-stream";
-    if (body.content_type !== undefined && body.content_type !== null) {
-      if (typeof body.content_type !== "string" || body.content_type.trim().length === 0) {
-        return jsonError(c, 400, "invalid_content_type");
-      }
-      contentType = body.content_type.trim();
-    }
+    const ctParsed = parseContentType(body.content_type);
+    if (!ctParsed.ok) return jsonError(c, 400, "invalid_content_type");
     if (typeof body.content_base64 !== "string") {
       return jsonError(c, 400, "missing_content_base64");
     }
@@ -1960,7 +1977,7 @@ export function createApp(): Hono {
     const expiresAt = now + ttlParsed.value * 1000;
     const rec: ChannelFile = {
       filename: body.filename,
-      contentType,
+      contentType: ctParsed.value,
       bytes: decoded,
       createdAt: now,
       expiresAt,

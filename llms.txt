@@ -253,8 +253,8 @@ curl -sS -X POST "$BASE/v1/channels/CHANNEL_ID/files" \
 ```
 
 Upload body fields:
-- `filename` (required): basename only, 1–128 chars; `/` or `\\` → 400 `invalid_filename`
-- `content_type` (optional): default `application/octet-stream`
+- `filename` (required): basename only, 1–128 chars, no `/`, no backslash, and no control characters → 400 `invalid_filename`
+- `content_type` (optional): default `application/octet-stream`; single-line `type/subtype`, up to 256 bytes, parameters allowed
 - `content_base64` (required): standard base64; whitespace allowed; decoded size checked
 - `ttl_seconds` (optional): default 3600; must be integer 1..86400 else 400 `invalid_ttl`
 
@@ -296,8 +296,8 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 | `missing_fields` | 400 | Auth request missing required fields |
 | `invalid_since` | 400 | Ping missing/invalid `since` ISO-8601 timestamp |
 | `missing_body` | 400 | Send missing `body` string |
-| `invalid_filename` | 400 | File upload filename missing, empty, >128 chars, or contains path separators |
-| `invalid_content_type` | 400 | File upload `content_type` present but empty/non-string |
+| `invalid_filename` | 400 | File upload filename missing, empty, >128 chars, control characters, or path separators |
+| `invalid_content_type` | 400 | File upload `content_type` present but empty, non-string, not a `type/subtype`, over 256 bytes, or carrying control characters |
 | `invalid_ttl` | 400 | `ttl_seconds` not an integer in 1..86400 |
 | `missing_content_base64` | 400 | File upload missing `content_base64` string |
 | `invalid_content_base64` | 400 | `content_base64` is not valid standard base64 |
