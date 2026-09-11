@@ -1209,6 +1209,9 @@ function parseContentType(raw: unknown): { ok: true; value: string } | { ok: fal
   if (typeof raw !== "string") return { ok: false };
   const trimmed = raw.trim();
   if (!trimmed || !MEDIA_TYPE_RE.test(trimmed)) return { ok: false };
+  // Parameter text is only loosely shaped by the pattern above, so controls are
+  // rejected here as well: C1 (e.g. U+0085) otherwise slips through ".*".
+  if (hasControlChars(trimmed)) return { ok: false };
   if (Buffer.byteLength(trimmed, "utf8") > CONTENT_TYPE_MAX_BYTES) return { ok: false };
   return { ok: true, value: trimmed };
 }

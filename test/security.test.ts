@@ -153,7 +153,14 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   it("rejects a content_type that is not a media type", async () => {
     const app = createApp();
     const channel = await newChannel(app);
-    for (const content_type of ["not a media type", "text", "/plain", "text/plain\r\nX-Injected: 1"]) {
+    for (const content_type of [
+      "not a media type",
+      "text",
+      "/plain",
+      "text/plain\r\nX-Injected: 1",
+      "text/plain; x=\u0085", // C1 NEL: matches the loose parameter pattern
+      "text/plain; x=\u0007", // C0 BEL
+    ]) {
       const res = await upload(app, channel, { filename: "note.txt", content_type, content_base64: PIXEL });
       assert.equal(res.status, 400, `accepted ${JSON.stringify(content_type)}`);
       assert.equal(res.body.error, "invalid_content_type");
