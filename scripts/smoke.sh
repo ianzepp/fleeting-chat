@@ -56,7 +56,7 @@ echo "== second join should 409 =="
 CODE=$(curl -sS -o /tmp/fleeting-join2.json -w '%{http_code}' -X POST "$BASE/v1/channels/${CHANNEL_ID}/join" \
   -H 'Content-Type: application/json' \
   -d "{\"public_key_pem\": $(pem_json "$KEYS/b.pub.pem")}")
-# same key re-join is idempotent 200; use a third key for 409
+# same-key re-join is no longer a 409 case (it requires a signed challenge); use a third key
 openssl genpkey -algorithm Ed25519 -out "$KEYS/c.pem" 2>/dev/null
 openssl pkey -in "$KEYS/c.pem" -pubout -out "$KEYS/c.pub.pem" 2>/dev/null
 CODE=$(curl -sS -o /tmp/fleeting-join2.json -w '%{http_code}' -X POST "$BASE/v1/channels/${CHANNEL_ID}/join" \
