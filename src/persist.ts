@@ -15,16 +15,12 @@
  */
 
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
   mkdirSync,
-  openSync,
   readFileSync,
-  renameSync,
   rmSync,
-  writeSync,
 } from "node:fs";
+import { open, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
@@ -58,7 +54,8 @@ export class StoreIntegrityError extends Error {
 /** Meta row holding the verifier for the key the store was written with. */
 const KEY_CHECK_ROW = "store_key_check";
 
-const SAVE_DEBOUNCE_MS = 300;
+/** Debounce window before a mutation is written; exported so tests can wait on it. */
+export const SAVE_DEBOUNCE_MS = 300;
 const SQLITE_NAME = "fleeting.sqlite";
 const JSON_NAME = "store.json";
 /** Name older releases used for the post-migration plaintext copy. Still removed
@@ -67,6 +64,8 @@ const JSON_MIGRATED_NAME = "store.json.migrated";
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStore: Store | null = null;
+let saveInFlight: Promise<void> | null = null;
+let saveAgain = false;
 
 const wasmPath = path.join(
   path.dirname(fileURLToPath(import.meta.resolve("sql.js"))),
@@ -278,10 +277,30 @@ function createSchema(db: Database): void {
   `);
 }
 
-function writeStoreSync(store: Store, dataDir: string): void {
+/** Let the event loop serve other requests between slices of a save. */
+function yieldToLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Rows between yields. Message bodies are capped at 8 KiB, so a 64-row slice is
+ *  at most half a megabyte of work; a file can be 1 MiB, so files slice far
+ *  sooner. Yields are cheap enough that this stays lost in the noise. */
+const SAVE_SLICE_ROWS = 64;
+const SAVE_SLICE_FILES = 4;
+
+/**
+ * Write the whole store to `fleeting.sqlite`.
+ *
+ * A save re-encrypts and re-serializes everything, which is O(store) work; it is
+ * therefore sliced and awaited rather than run to completion in one turn, so a
+ * mutation cannot freeze every other channel. Only one save runs at a time (see
+ * drainSaveQueue).
+ */
+async function writeStore(store: Store, dataDir: string): Promise<void> {
   mkdirSync(dataDir, { recursive: true });
   const key = getEncryptionKey();
   const db = new SQL.Database();
+  let rowsSinceYield = 0;
   try {
     createSchema(db);
     const check = storeKeyCheck(key ?? Buffer.alloc(0));
@@ -349,8 +368,13 @@ function writeStoreSync(store: Store, dataDir: string): void {
           body,
           seq,
         ]);
+        if (++rowsSinceYield >= SAVE_SLICE_ROWS) {
+          rowsSinceYield = 0;
+          await yieldToLoop();
+        }
       }
 
+      let filesSinceYield = 0;
       for (const [fid, f] of ch.files) {
         const bytesText =
           encrypted && key
@@ -366,6 +390,10 @@ function writeStoreSync(store: Store, dataDir: string): void {
           f.expiresAt,
           f.seat,
         ]);
+        if (++filesSinceYield >= SAVE_SLICE_FILES) {
+          filesSinceYield = 0;
+          await yieldToLoop();
+        }
       }
     }
     insChannel.free();
@@ -425,36 +453,36 @@ function writeStoreSync(store: Store, dataDir: string): void {
       `${SQLITE_NAME}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
     );
     const exported = Buffer.from(db.export());
-    writeDurably(tmp, exported, dataDir);
-    renameSync(tmp, file);
+    await writeDurably(tmp, exported);
+    await rename(tmp, file);
     // The rename must survive a crash before callers treat the write as done —
     // notably the migration path, which deletes the plaintext JSON afterwards.
-    syncDirectory(dataDir);
+    await syncDirectory(dataDir);
   } finally {
     db.close();
   }
 }
 
 /** Write contents and flush them to disk before the caller replaces the real file. */
-function writeDurably(target: string, contents: Buffer, dataDir: string): void {
-  const fd = openSync(target, "w", 0o600);
+async function writeDurably(target: string, contents: Buffer): Promise<void> {
+  const handle = await open(target, "w", 0o600);
   try {
-    writeSync(fd, contents);
-    fsyncSync(fd);
+    await handle.writeFile(contents);
+    await handle.sync();
   } finally {
-    closeSync(fd);
+    await handle.close();
   }
 }
 
 /** Fsync a directory so a rename into it is durable. Opening a directory is not
  *  portable, so a failure is reported rather than fatal. */
-function syncDirectory(dir: string): void {
+async function syncDirectory(dir: string): Promise<void> {
   try {
-    const fd = openSync(dir, "r");
+    const handle = await open(dir, "r");
     try {
-      fsyncSync(fd);
+      await handle.sync();
     } finally {
-      closeSync(fd);
+      await handle.close();
     }
   } catch (err) {
     console.error("fleeting.chat: could not fsync the data directory:", err);
@@ -778,8 +806,9 @@ function loadFromJsonFile(store: Store, jsonPath: string, now = Date.now()): voi
   applyLoaded(store, data, now);
 }
 
-/** Cancel debounce and write immediately (no-op without a data dir). */
-export function flushSync(store: Store): void {
+/** Write now, after any save already running, so the newest data is the last on
+ *  disk (no-op without a data dir). Used at shutdown and in tests. */
+export async function flushStore(store: Store): Promise<void> {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -787,7 +816,8 @@ export function flushSync(store: Store): void {
   pendingStore = null;
   const dataDir = resolveDataDir();
   if (!dataDir) return;
-  writeStoreSync(store, dataDir);
+  while (saveInFlight) await saveInFlight;
+  await writeStore(store, dataDir);
 }
 
 /** Debounce ~300ms after mutations; no-op when no data dir is configured. */
@@ -798,17 +828,37 @@ export function scheduleSave(store: Store): void {
   // Keep the timer ref'd so a pending debounce can still flush before idle exit.
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const s = pendingStore;
-    pendingStore = null;
-    if (!s) return;
-    const dataDir = resolveDataDir();
-    if (!dataDir) return;
-    try {
-      writeStoreSync(s, dataDir);
-    } catch (err) {
-      console.error("fleeting.chat: failed to persist fleeting.sqlite:", err);
-    }
+    void drainSaveQueue();
   }, SAVE_DEBOUNCE_MS);
+}
+
+/** Run one save at a time; a request arriving mid-save is coalesced into a
+ *  follow-up pass rather than queued separately. */
+async function drainSaveQueue(): Promise<void> {
+  if (saveInFlight) {
+    saveAgain = true;
+    return;
+  }
+  const pass = (async () => {
+    do {
+      saveAgain = false;
+      const target = pendingStore;
+      pendingStore = null;
+      const dataDir = resolveDataDir();
+      if (!target || !dataDir) return;
+      try {
+        await writeStore(target, dataDir);
+      } catch (err) {
+        console.error("fleeting.chat: failed to persist fleeting.sqlite:", err);
+      }
+    } while (saveAgain);
+  })();
+  saveInFlight = pass;
+  try {
+    await pass;
+  } finally {
+    saveInFlight = null;
+  }
 }
 
 let shutdownHooksInstalled = false;
@@ -817,17 +867,17 @@ let shutdownHooksInstalled = false;
 export function installShutdownFlush(store: Store): void {
   if (shutdownHooksInstalled) return;
   shutdownHooksInstalled = true;
-  const onSignal = (signal: string) => {
+  const onSignal = async (signal: string) => {
     try {
-      flushSync(store);
+      await flushStore(store);
       console.error(`fleeting.chat: flushed fleeting.sqlite on ${signal}`);
     } catch (err) {
       console.error(`fleeting.chat: flush on ${signal} failed:`, err);
     }
     process.exit(0);
   };
-  process.on("SIGTERM", () => onSignal("SIGTERM"));
-  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => void onSignal("SIGTERM"));
+  process.on("SIGINT", () => void onSignal("SIGINT"));
 }
 
 /** Delete migrated legacy JSON. It holds plaintext message bodies and live bearer
@@ -871,7 +921,7 @@ export async function loadStore(store: Store): Promise<void> {
 
     if (existsSync(jsonPath)) {
       loadFromJsonFile(store, jsonPath);
-      writeStoreSync(store, dataDir);
+      await writeStore(store, dataDir);
       removeLegacyStoreFiles([jsonPath, migratedPath]);
       console.error(
         "fleeting.chat: migrated store.json → fleeting.sqlite (legacy JSON removed)"

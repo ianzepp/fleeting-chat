@@ -14,7 +14,12 @@ import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store } from "../src/store.js";
-import { flushSync, loadStore, resolveDataDir } from "../src/persist.js";
+import {
+  SAVE_DEBOUNCE_MS,
+  flushStore,
+  loadStore,
+  resolveDataDir,
+} from "../src/persist.js";
 import {
   decryptUtf8,
   getEncryptionKey,
@@ -56,8 +61,8 @@ describe("SQLite persistence", () => {
     freshStore();
   });
 
-  afterEach(() => {
-    flushSync(store);
+  afterEach(async () => {
+    await flushStore(store);
     freshStore();
     rmSync(dataDir, { recursive: true, force: true });
     delete process.env.DATA_DIR;
@@ -75,7 +80,7 @@ describe("SQLite persistence", () => {
     process.env.DATA_DIR = dataDir;
   });
 
-  it("flushSync drains a pending debounced save to fleeting.sqlite", async () => {
+  it("flushStore drains a pending debounced save to fleeting.sqlite", async () => {
     const app = createApp();
     const { publicPem } = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
@@ -85,7 +90,7 @@ describe("SQLite persistence", () => {
     });
     assert.equal(created.status, 200);
     const file = join(dataDir, "fleeting.sqlite");
-    flushSync(store);
+    await flushStore(store);
     assert.equal(existsSync(file), true);
     assert.ok(existsSync(file));
     freshStore();
@@ -141,7 +146,7 @@ describe("SQLite persistence", () => {
     assert.equal(up.status, 201);
     const fileId = up.body.file_id as string;
 
-    flushSync(store);
+    await flushStore(store);
     const disk = join(dataDir, "fleeting.sqlite");
     assert.ok(existsSync(disk));
     // Raw sqlite bytes should not contain the plaintext body as a bare UTF-8 string.
@@ -201,7 +206,7 @@ describe("SQLite persistence", () => {
     });
     assert.equal(send.status, 201);
 
-    flushSync(store);
+    await flushStore(store);
     const rawBytes = readFileSync(join(dataDir, "fleeting.sqlite"));
     assert.equal(rawBytes.includes(Buffer.from("plain hi", "utf8")), true);
 
@@ -274,7 +279,7 @@ describe("SQLite persistence", () => {
     const tok = resolveBearer(`Bearer ${tokenA}`)!;
     tok.expiresAt = Date.now() - 1;
 
-    flushSync(store);
+    await flushStore(store);
     freshStore();
     await loadStore(store);
 
@@ -306,7 +311,7 @@ describe("SQLite persistence", () => {
     assert.equal(tok.status, 200);
     const agentToken = tok.body.token as string;
 
-    flushSync(store);
+    await flushStore(store);
     freshStore();
     await loadStore(store);
 
@@ -446,7 +451,7 @@ describe("SQLite persistence", () => {
   it("drops a store.json that reappears beside an existing SQLite file", async () => {
     freshStore();
     await loadStore(store);
-    flushSync(store);
+    await flushStore(store);
 
     const jsonPath = join(dataDir, "store.json");
     writeFileSync(jsonPath, '{"version":1,"channels":[],"tokens":[]}', "utf8");
@@ -466,7 +471,7 @@ describe("SQLite persistence", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     const tokenA = create.body.token as string;
-    flushSync(store);
+    await flushStore(store);
 
     const file = join(dataDir, "fleeting.sqlite");
     const raw = readFileSync(file);
@@ -480,6 +485,59 @@ describe("SQLite persistence", () => {
   it("digests a legacy plaintext token row rather than dropping the session", () => {
     assert.equal(migrateStoredToken("legacy-bearer"), tokenDigest("legacy-bearer"));
     assert.equal(migrateStoredToken(tokenDigest("already")), tokenDigest("already"));
+  });
+
+  it("reaches disk from the debounced save, with no explicit flush", async () => {
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, encrypted: false }),
+    });
+    const channelId = create.body.channel_id as string;
+    await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${create.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "debounced" }),
+    });
+
+    await new Promise((r) => setTimeout(r, SAVE_DEBOUNCE_MS + 400));
+
+    freshStore();
+    await loadStore(store);
+    assert.equal(store.channels.get(channelId)!.messages[0].body, "debounced");
+  });
+
+  it("keeps the newest data when a save is already running", async () => {
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, encrypted: false }),
+    });
+    const channelId = create.body.channel_id as string;
+    const token = create.body.token as string;
+    const send = (body: string) =>
+      json(app, `/v1/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+
+    await send("first");
+    await new Promise((r) => setTimeout(r, SAVE_DEBOUNCE_MS + 60)); // let the write start
+    await send("second");
+    await new Promise((r) => setTimeout(r, SAVE_DEBOUNCE_MS + 400));
+
+    freshStore();
+    await loadStore(store);
+    const bodies = store.channels.get(channelId)!.messages.map((m) => m.body);
+    assert.deepEqual(bodies, ["first", "second"]);
   });
 
   /** Rewrite the store file directly, to stand in for a database written by an
@@ -516,7 +574,7 @@ describe("SQLite persistence", () => {
       },
       body: JSON.stringify({ body: "secret hi" }),
     });
-    flushSync(store);
+    await flushStore(store);
     freshStore();
     return channelId;
   }
