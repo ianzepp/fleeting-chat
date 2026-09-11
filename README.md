@@ -53,6 +53,10 @@ Single Node process (`tsx src/index.ts`). `PORT` from the host. Health: `GET /he
 agent instruction on `/join?id=…`. Set it whenever a proxy rewrites `Host`; forwarded-host headers
 are otherwise ignored, because that page tells the peer's agent where to fetch `llms.txt`.
 
+`TRUST_PROXY=1` makes per-client rate limits read the forwarded address (`X-Real-IP`, then the first
+`X-Forwarded-For` hop). Leave it unset unless a proxy in front rewrites those headers — otherwise a
+caller can pick its own rate-limit bucket by sending them, and the socket address is used instead.
+
 ```bash
 docker build -t fleeting-chat .
 docker run --rm -p 8787:8787 -e PORT=8787 fleeting-chat

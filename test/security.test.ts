@@ -9,7 +9,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createApp } from "../src/app.js";
-import { MAX_TOTAL_WAITERS, MAX_WAITERS_PER_CHANNEL, store } from "../src/store.js";
+import { IP_RATE_LIMIT_PER_MIN, MAX_TOTAL_WAITERS, MAX_WAITERS_PER_CHANNEL, store } from "../src/store.js";
 import {
   bearer,
   ed25519PemPair,
@@ -479,5 +479,55 @@ describe("long-poll admission (BH-DOS-002)", () => {
       headers: bearer(channel.token),
     });
     assert.equal(short.status, 200);
+  });
+});
+
+describe("client identity for throttling (BH-RATE-001)", () => {
+  let prevTrustProxy: string | undefined;
+
+  beforeEach(() => {
+    prevTrustProxy = process.env.TRUST_PROXY;
+    delete process.env.TRUST_PROXY;
+    freshStore();
+  });
+
+  afterEach(() => {
+    if (prevTrustProxy === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = prevTrustProxy;
+  });
+
+  /** One request per forged identity, as an attacker would rotate it. */
+  async function reserveFlood(app: App, attempts: number) {
+    const codes: Record<number, number> = {};
+    for (let i = 0; i < attempts; i++) {
+      const res = await json(
+        app,
+        "/v1/channels/reserve",
+        postJson({ encrypted: false }, { "X-Forwarded-For": `203.0.113.${i % 250}` })
+      );
+      codes[res.status] = (codes[res.status] ?? 0) + 1;
+    }
+    return codes;
+  }
+
+  it("does not let a rotating X-Forwarded-For mint fresh rate-limit buckets", async () => {
+    const app = createApp();
+    const codes = await reserveFlood(app, IP_RATE_LIMIT_PER_MIN + 5);
+    assert.ok(
+      codes[429] >= 1,
+      `spoofed forwarded headers bypassed throttling: ${JSON.stringify(codes)}`
+    );
+  });
+
+  it("honours forwarded headers when the deployment declares a trusted proxy", async () => {
+    process.env.TRUST_PROXY = "1";
+    freshStore();
+    const app = createApp();
+    const codes = await reserveFlood(app, 40);
+    assert.equal(
+      codes[429],
+      undefined,
+      `trusted-proxy mode throttled a legitimate rotation: ${JSON.stringify(codes)}`
+    );
   });
 });

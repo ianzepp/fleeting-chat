@@ -983,15 +983,45 @@ function setPublicCors(c: { header: (k: string, v: string) => void }) {
   c.header("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+/** Whether forwarded client-IP headers may be believed. Off unless the deployment
+ *  says otherwise: only a proxy that rewrites them (Railway overwrites X-Real-IP
+ *  and strips a client-supplied X-Forwarded-For) makes them trustworthy, and
+ *  believing them by default lets a caller choose its own rate-limit bucket. */
+function trustProxyHeaders(): boolean {
+  const raw = process.env.TRUST_PROXY?.trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+/** Real peer address from the Node adapter; null for an in-process request. */
+function socketAddress(env: unknown): string | null {
+  if (typeof env !== "object" || env === null) return null;
+  const incoming = (env as { incoming?: unknown }).incoming;
+  if (typeof incoming !== "object" || incoming === null) return null;
+  const socket = (incoming as { socket?: unknown }).socket;
+  if (typeof socket !== "object" || socket === null) return null;
+  const remoteAddress = (socket as { remoteAddress?: unknown }).remoteAddress;
+  return typeof remoteAddress === "string" && remoteAddress ? remoteAddress : null;
+}
+
+function forwardedClientIp(req: { header: (n: string) => string | undefined }): string | null {
+  const real = req.header("x-real-ip")?.trim();
+  if (real) return real;
+  const first = req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  return first ? first : null;
+}
+
+/** Rate-limit identity. Behind a declared proxy the forwarded address is used
+ *  (X-Real-IP first, since that is the one Railway overwrites); otherwise only the
+ *  socket address is trusted, because that is the one value a client cannot pick. */
+function clientIp(c: {
+  env?: unknown;
+  req: { header: (n: string) => string | undefined };
+}): string {
+  if (trustProxyHeaders()) {
+    const forwarded = forwardedClientIp(c.req);
+    if (forwarded) return forwarded;
   }
-  const real = c.req.header("x-real-ip");
-  if (real) return real.trim();
-  return "unknown";
+  return socketAddress(c.env) ?? "unknown";
 }
 
 function contentTypeIsJson(ct: string | undefined): boolean {

@@ -934,20 +934,28 @@ describe("fleeting.chat spike", () => {
 
   it("ip rate limit returns 429 without being flaky", async () => {
     freshStore();
-    const app = createApp();
-    const a = ed25519PemPair();
-    // Directly saturate the IP window instead of issuing 30+ real creates
-    store.ipRate.set("203.0.113.9", { start: Date.now(), count: IP_RATE_LIMIT_PER_MIN });
-    const res = await json(app, "/v1/channels", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Forwarded-For": "203.0.113.9",
-      },
-      body: JSON.stringify({ public_key_pem: a.publicPem }),
-    });
-    assert.equal(res.status, 429);
-    assert.equal(res.body.error, "rate_limited");
+    // Forwarded identities are only believed behind a declared proxy.
+    const prevTrustProxy = process.env.TRUST_PROXY;
+    process.env.TRUST_PROXY = "1";
+    try {
+      const app = createApp();
+      const a = ed25519PemPair();
+      // Directly saturate the IP window instead of issuing 30+ real creates
+      store.ipRate.set("203.0.113.9", { start: Date.now(), count: IP_RATE_LIMIT_PER_MIN });
+      const res = await json(app, "/v1/channels", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.9",
+        },
+        body: JSON.stringify({ public_key_pem: a.publicPem }),
+      });
+      assert.equal(res.status, 429);
+      assert.equal(res.body.error, "rate_limited");
+    } finally {
+      if (prevTrustProxy === undefined) delete process.env.TRUST_PROXY;
+      else process.env.TRUST_PROXY = prevTrustProxy;
+    }
   });
 
   it("file upload/download roundtrip base64 (whitespace ok)", async () => {
