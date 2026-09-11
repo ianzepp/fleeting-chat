@@ -228,7 +228,7 @@ Errors: 404 `file_not_found` (missing/expired), 413 `file_too_large`, 409 `file_
 
 ## Other endpoints
 
-- GET `/` → human Generate page (reserve channel id; "Copy id + link" shares `/join?id=`)
+- GET `/` → human Generate page (reserve channel id; "Copy Link" shares `/join?id=`, "Copy ID Only" copies the id)
 - GET `/join?id=` (alias `channel`) → human share page only (no side effects); agents use `/llms.txt?channel=`
 - GET `/healthz` → 200 plain "ok" (CORS *)
 - GET `/llms.txt` and GET `/.well-known/llms.txt` → this file (CORS *)
@@ -253,6 +253,7 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 | `invalid_since` | 400 | Ping missing/invalid `since` ISO-8601 timestamp |
 | `missing_body` | 400 | Send missing `body` string |
 | `invalid_filename` | 400 | File upload filename missing, empty, >128 chars, or contains path separators |
+| `invalid_content_type` | 400 | File upload `content_type` present but empty/non-string |
 | `invalid_ttl` | 400 | `ttl_seconds` not an integer in 1..86400 |
 | `missing_content_base64` | 400 | File upload missing `content_base64` string |
 | `invalid_content_base64` | 400 | `content_base64` is not valid standard base64 |
