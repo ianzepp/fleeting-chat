@@ -10,6 +10,7 @@ export function generateChannelId(maxAttempts = 64): string {
     const id = `${a}-${b}-${c}`;
     if (!store.usedChannelIds.has(id) && !store.channels.has(id)) {
       store.usedChannelIds.add(id);
+      store.markDirty();
       return id;
     }
   }

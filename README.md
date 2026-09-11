@@ -54,7 +54,16 @@ npm test
 
 ## Deploy (Railway / Docker / Nixpacks)
 
-Single Node process; in-memory store (no DB). Set `PORT` (Railway injects it).
+Single Node process. Set `PORT` (Railway injects it).
+
+### Durable store (optional volume)
+
+By default the store is **in-memory only** (lost on restart). To persist channels across restarts, mount a volume and point the process at it:
+
+- `DATA_DIR` — preferred path for `{DATA_DIR}/store.json` (atomic write)
+- or `RAILWAY_VOLUME_MOUNT_PATH` — used when `DATA_DIR` is unset (Railway volume mount)
+
+Example: mount `/data` and set `DATA_DIR=/data`. Without either env var, behavior stays in-memory (existing tests need no `DATA_DIR`).
 
 ### Railway
 

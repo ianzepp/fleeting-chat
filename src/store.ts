@@ -1,5 +1,7 @@
 /** In-memory channel store for the fleeting.chat spike. */
 
+import { scheduleSave } from "./persist.js";
+
 export const SEAT_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
 export type Seat = (typeof SEAT_LETTERS)[number];
 
@@ -160,6 +162,11 @@ export class Store {
   /** create + join + auth endpoints per IP */
   ipRate = new Map<string, IpRateWindow>();
 
+  /** Schedule a debounced persist when a data dir is configured. */
+  markDirty(): void {
+    scheduleSave(this);
+  }
+
   getChannel(id: string): Channel | undefined {
     const ch = this.channels.get(id);
     if (!ch) return undefined;
@@ -177,6 +184,7 @@ export class Store {
 
   touchIdle(ch: Channel, now = Date.now()): void {
     ch.idleExpiresAt = Math.min(ch.absoluteExpiresAt, now + ch.idleTtlMs);
+    this.markDirty();
   }
 
   deleteChannel(id: string): void {
@@ -198,6 +206,7 @@ export class Store {
     for (const [cid, rec] of this.challenges) {
       if (rec.channelId === id) this.challenges.delete(cid);
     }
+    this.markDirty();
   }
 
   /** Returns false if over limit (caller should 429). Increments on success. */
@@ -214,9 +223,14 @@ export class Store {
 
   /** Drop expired file attachments on a channel (on access / sweep). */
   sweepChannelFiles(ch: Channel, now = Date.now()): void {
+    let removed = false;
     for (const [fid, f] of ch.files) {
-      if (now >= f.expiresAt) ch.files.delete(fid);
+      if (now >= f.expiresAt) {
+        ch.files.delete(fid);
+        removed = true;
+      }
     }
+    if (removed) this.markDirty();
   }
 
   sweep(now = Date.now()): void {
@@ -224,21 +238,35 @@ export class Store {
       if (this.isExpired(ch, now)) this.deleteChannel(id);
       else this.sweepChannelFiles(ch, now);
     }
+    let authChanged = false;
     for (const [tok, rec] of this.tokens) {
-      if (now >= rec.expiresAt) this.tokens.delete(tok);
+      if (now >= rec.expiresAt) {
+        this.tokens.delete(tok);
+        authChanged = true;
+      }
     }
     for (const [cid, rec] of this.challenges) {
-      if (now >= rec.expiresAt) this.challenges.delete(cid);
+      if (now >= rec.expiresAt) {
+        this.challenges.delete(cid);
+        authChanged = true;
+      }
     }
     for (const [tok, rec] of this.agentTokens) {
-      if (now >= rec.expiresAt) this.agentTokens.delete(tok);
+      if (now >= rec.expiresAt) {
+        this.agentTokens.delete(tok);
+        authChanged = true;
+      }
     }
     for (const [cid, rec] of this.agentChallenges) {
-      if (now >= rec.expiresAt) this.agentChallenges.delete(cid);
+      if (now >= rec.expiresAt) {
+        this.agentChallenges.delete(cid);
+        authChanged = true;
+      }
     }
     for (const [ip, win] of this.ipRate) {
       if (now - win.start >= 60_000) this.ipRate.delete(ip);
     }
+    if (authChanged) this.markDirty();
   }
 }
 

@@ -1094,6 +1094,7 @@ function appendMessage(ch: Channel, from: Seat, body: string): Message {
   if (seatNick) msg.nick = seatNick;
   ch.messages.push(msg);
   while (ch.messages.length > MESSAGE_RETAIN) ch.messages.shift();
+  store.markDirty();
 
   const still: typeof ch.waiters = [];
   for (const w of ch.waiters) {
@@ -1308,6 +1309,7 @@ export function createApp(): Hono {
       waiters: [],
     };
     store.channels.set(id, ch);
+    store.markDirty();
     setApiSecurityHeaders(c);
     return c.json({
       channel_id: id,
@@ -1376,6 +1378,7 @@ export function createApp(): Hono {
       waiters: [],
     };
     store.channels.set(id, ch);
+    store.markDirty();
     const tok = mintToken(id, "A", now);
     setApiSecurityHeaders(c);
     const resp: Record<string, unknown> = {
@@ -1859,7 +1862,10 @@ export function createApp(): Hono {
     store.sweepChannelFiles(ch);
     const rec = ch.files.get(fileId);
     if (!rec || Date.now() >= rec.expiresAt) {
-      if (rec) ch.files.delete(fileId);
+      if (rec) {
+        ch.files.delete(fileId);
+        store.markDirty();
+      }
       return jsonError(c, 404, "file_not_found");
     }
 

@@ -54,6 +54,7 @@ export function mintToken(channelId: string, seat: Seat, now = Date.now()): Toke
     expiresAt: now + TOKEN_TTL_MS,
   };
   store.tokens.set(token, rec);
+  store.markDirty();
   return rec;
 }
 
@@ -70,6 +71,7 @@ export function createChallenge(
     publicKeyPem: normalizePem(publicKeyPem),
     expiresAt,
   });
+  store.markDirty();
   return { challenge, expires_at: new Date(expiresAt).toISOString() };
 }
 
@@ -82,11 +84,13 @@ export function consumeChallenge(
   if (!rec) return false;
   if (Date.now() >= rec.expiresAt) {
     store.challenges.delete(challenge);
+    store.markDirty();
     return false;
   }
   if (!safeEqualStr(rec.channelId, channelId)) return false;
   if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
   store.challenges.delete(challenge);
+  store.markDirty();
   return true;
 }
 
@@ -102,6 +106,7 @@ export function resolveBearer(authHeader: string | undefined): TokenRecord | nul
   if (!rec) return null;
   if (Date.now() >= rec.expiresAt) {
     store.tokens.delete(m[1]);
+    store.markDirty();
     return null;
   }
   return rec;
@@ -115,6 +120,7 @@ export function mintAgentToken(publicKeyPem: string, now = Date.now()): AgentTok
     expiresAt: now + TOKEN_TTL_MS,
   };
   store.agentTokens.set(token, rec);
+  store.markDirty();
   return rec;
 }
 
@@ -129,6 +135,7 @@ export function createAgentChallenge(
     publicKeyPem: normalizePem(publicKeyPem),
     expiresAt,
   });
+  store.markDirty();
   return { challenge, expires_at: new Date(expiresAt).toISOString() };
 }
 
@@ -137,10 +144,12 @@ export function consumeAgentChallenge(challenge: string, publicKeyPem: string): 
   if (!rec) return false;
   if (Date.now() >= rec.expiresAt) {
     store.agentChallenges.delete(challenge);
+    store.markDirty();
     return false;
   }
   if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
   store.agentChallenges.delete(challenge);
+  store.markDirty();
   return true;
 }
 
@@ -156,6 +165,7 @@ export function resolveAgentBearer(authHeader: string | undefined): AgentTokenRe
   if (!rec) return null;
   if (Date.now() >= rec.expiresAt) {
     store.agentTokens.delete(m[1]);
+    store.markDirty();
     return null;
   }
   return rec;
