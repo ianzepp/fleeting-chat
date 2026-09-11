@@ -89,6 +89,32 @@ export async function mintSeatTokenViaSignature(
   return { status: tok.status, body: tok.body };
 }
 
+/** Re-bind an already-occupied seat: that path requires challenge + signature. */
+export async function joinWithProof(
+  app: App,
+  channelId: string,
+  pair: PemPair,
+  extra: Record<string, unknown> = {}
+): Promise<JsonResponse> {
+  const ch = await json(
+    app,
+    "/v1/auth/challenge",
+    postJson({ channel_id: channelId, public_key_pem: pair.publicPem })
+  );
+  assert.equal(ch.status, 200, `challenge failed: ${JSON.stringify(ch.body)}`);
+  const challenge = ch.body.challenge as string;
+  return json(
+    app,
+    `/v1/channels/${channelId}/join`,
+    postJson({
+      public_key_pem: pair.publicPem,
+      challenge,
+      signature_base64: signChallenge(pair, challenge),
+      ...extra,
+    })
+  );
+}
+
 export async function mintAgentTokenViaApi(app: App, pair: PemPair): Promise<string> {
   const ch = await json(app, "/v1/auth/agent/challenge", postJson({ public_key_pem: pair.publicPem }));
   assert.equal(ch.status, 200);

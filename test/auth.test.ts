@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL } from "../src/store.js";
-import { ed25519PemPair, freshStore, json, mintAgentTokenViaApi } from "./support.js";
+import { ed25519PemPair, freshStore, joinWithProof, json, mintAgentTokenViaApi } from "./support.js";
 
 describe("fleeting.chat spike", () => {
   let prevEncKey: string | undefined;
@@ -76,7 +76,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(poll.body.messages[0].body, "ping");
   });
 
-  it("same pubkey re-join remints seat and cannot take two seats", async () => {
+  it("same pubkey re-join remints seat with proof and cannot take two seats", async () => {
     freshStore();
     const app = createApp();
     const a = ed25519PemPair();
@@ -87,11 +87,16 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     const channelId = create.body.channel_id as string;
-    const rejoin = await json(app, `/v1/channels/${channelId}/join`, {
+    // The public key alone no longer re-binds an occupied seat.
+    const unproven = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
+    assert.equal(unproven.status, 401);
+    assert.equal(unproven.body.error, "proof_required");
+
+    const rejoin = await joinWithProof(app, channelId, a);
     assert.equal(rejoin.status, 200);
     assert.equal(rejoin.body.seat, "1");
     assert.ok(rejoin.body.token);
@@ -816,12 +821,8 @@ describe("fleeting.chat spike", () => {
     assert.equal(poll.body.messages[0].nick, "alice");
     assert.equal(poll.body.messages[1].nick, "bob");
 
-    // remint with new nick updates stored nick
-    const rejoin = await json(app, `/v1/channels/${channelId}/join`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "alice2" }),
-    });
+    // remint with new nick updates stored nick (re-binding an occupied seat needs proof)
+    const rejoin = await joinWithProof(app, channelId, a, { nick: "alice2" });
     assert.equal(rejoin.status, 200);
     assert.equal(rejoin.body.seat, "1");
     assert.equal(rejoin.body.nick, "alice2");

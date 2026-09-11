@@ -1566,7 +1566,12 @@ export function createApp(): Hono {
     const id = normalizeChannelId(idRaw);
     if (!id) return jsonError(c, 400, "invalid_channel_id");
 
-    const parsed = await readJsonBody<{ public_key_pem?: string; nick?: unknown }>(c);
+    const parsed = await readJsonBody<{
+      public_key_pem?: string;
+      nick?: unknown;
+      challenge?: unknown;
+      signature_base64?: unknown;
+    }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
@@ -1584,6 +1589,24 @@ export function createApp(): Hono {
     const pem = normalizePem(body.public_key_pem);
     const existing = seatForPubkey(ch, pem);
     if (existing) {
+      // Re-binding an occupied seat mints a fresh bearer, so it must prove
+      // possession of the private key. Public keys are public by construction:
+      // without this, anyone who has seen the key could take the seat over,
+      // read the room, and post as its holder.
+      if (typeof body.challenge !== "string" || typeof body.signature_base64 !== "string") {
+        return jsonError(
+          c,
+          401,
+          "proof_required",
+          "re-joining an occupied seat requires challenge + signature_base64; use /v1/auth/challenge then /v1/auth/token to refresh instead"
+        );
+      }
+      if (!consumeChallenge(body.challenge, id, pem)) {
+        return jsonError(c, 401, "invalid_or_expired_challenge");
+      }
+      if (!verifyEd25519Signature(pem, body.challenge, body.signature_base64)) {
+        return jsonError(c, 401, "invalid_signature");
+      }
       const seatState = ch.seats[existing]!;
       // Idempotent re-join: if new nick provided, update stored nick; remint token
       if (body.nick !== undefined && body.nick !== null) {

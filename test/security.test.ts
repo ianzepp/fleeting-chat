@@ -14,6 +14,7 @@ import {
   ed25519PemPair,
   freshStore,
   html,
+  joinWithProof,
   json,
   mintSeatTokenViaSignature,
   postJson,
@@ -195,7 +196,7 @@ describe("seat token rotation (BH-AUTH-003)", () => {
     const pair = ed25519PemPair();
     const { id, token: first } = await createSeatOne(app, pair);
 
-    const rejoin = await json(app, `/v1/channels/${id}/join`, postJson({ public_key_pem: pair.publicPem }));
+    const rejoin = await joinWithProof(app, id, pair);
     assert.equal(rejoin.status, 200);
     const second = rejoin.body.token as string;
     assert.notEqual(second, first);
@@ -306,5 +307,104 @@ describe("file upload throttling (BH-DOS-006)", () => {
       const res = await upload(app, channel, { filename: `f${i}.txt`, content_base64: "aGk=" });
       assert.equal(res.status, 201, `upload ${i}: ${JSON.stringify(res.body)}`);
     }
+  });
+});
+
+describe("seat takeover via re-join (BH-AUTH-001)", () => {
+  beforeEach(() => freshStore());
+
+  /** Victim holds seat 1 and has posted a secret the attacker wants. */
+  async function victimSetup(app: App) {
+    const victim = ed25519PemPair();
+    const created = await json(
+      app,
+      "/v1/channels",
+      postJson({ public_key_pem: victim.publicPem, max_seats: 2 })
+    );
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    const id = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const sent = await json(
+      app,
+      `/v1/channels/${id}/messages`,
+      postJson({ body: "SECRET: merger closes Friday" }, bearer(token))
+    );
+    assert.equal(sent.status, 201);
+    return { id, victim, token };
+  }
+
+  it("refuses to mint a seat token from a known public key alone", async () => {
+    const app = createApp();
+    const { id, victim, token } = await victimSetup(app);
+
+    const stolen = await json(
+      app,
+      `/v1/channels/${id}/join`,
+      postJson({ public_key_pem: victim.publicPem })
+    );
+    assert.equal(stolen.status, 401, "public key alone still minted a seat token");
+    assert.equal(stolen.body.error, "proof_required");
+    assert.equal(stolen.body.token, undefined);
+
+    const read = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(token) });
+    assert.equal(read.status, 200);
+    assert.equal(read.body.messages.length, 1);
+  });
+
+  it("refuses a re-join whose signature does not verify", async () => {
+    const app = createApp();
+    const { id, victim, token } = await victimSetup(app);
+    const attacker = ed25519PemPair();
+
+    // A challenge is freely obtainable for any pubkey; the signature is the gate.
+    const ch = await json(
+      app,
+      "/v1/auth/challenge",
+      postJson({ channel_id: id, public_key_pem: victim.publicPem })
+    );
+    assert.equal(ch.status, 200);
+    const challenge = ch.body.challenge as string;
+
+    const forged = await json(
+      app,
+      `/v1/channels/${id}/join`,
+      postJson({
+        public_key_pem: victim.publicPem,
+        challenge,
+        signature_base64: signChallenge(attacker, challenge),
+      })
+    );
+    assert.equal(forged.status, 401);
+    assert.equal(forged.body.error, "invalid_signature");
+
+    const read = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(token) });
+    assert.equal(read.status, 200);
+  });
+
+  it("lets the key holder re-join with a signed challenge and evicts the old bearer", async () => {
+    const app = createApp();
+    const { id, victim, token } = await victimSetup(app);
+
+    const rejoin = await joinWithProof(app, id, victim, { nick: "renamed" });
+    assert.equal(rejoin.status, 200, JSON.stringify(rejoin.body));
+    assert.equal(rejoin.body.seat, "1");
+    assert.equal(rejoin.body.nick, "renamed");
+
+    const renewed = await json(app, `/v1/channels/${id}/messages`, {
+      headers: bearer(rejoin.body.token),
+    });
+    assert.equal(renewed.status, 200);
+    const superseded = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(token) });
+    assert.equal(superseded.status, 401);
+  });
+
+  it("still binds a free seat from the channel id alone", async () => {
+    const app = createApp();
+    const { id } = await victimSetup(app);
+    const peer = ed25519PemPair();
+
+    const joined = await json(app, `/v1/channels/${id}/join`, postJson({ public_key_pem: peer.publicPem }));
+    assert.equal(joined.status, 200, JSON.stringify(joined.body));
+    assert.equal(joined.body.seat, "2");
   });
 });
