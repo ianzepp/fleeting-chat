@@ -27,6 +27,7 @@ import {
   tokenDigest,
 } from "../src/crypto-at-rest.js";
 import { resolveAgentBearer, resolveBearer } from "../src/auth.js";
+import { joinWithProof } from "./support.js";
 import { ed25519PemPair, freshStore, json } from "./support.js";
 
 describe("SQLite persistence", () => {
@@ -485,6 +486,35 @@ describe("SQLite persistence", () => {
   it("digests a legacy plaintext token row rather than dropping the session", () => {
     assert.equal(migrateStoredToken("legacy-bearer"), tokenDigest("legacy-bearer"));
     assert.equal(migrateStoredToken(tokenDigest("already")), tokenDigest("already"));
+  });
+
+  it("makes token revocation durable before the response", async () => {
+    const app = createApp();
+    const pair = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: pair.publicPem, encrypted: false }),
+    });
+    const channelId = create.body.channel_id as string;
+    const superseded = create.body.token as string;
+
+    // Let the create's debounced save reach disk, so the superseded bearer is
+    // actually persisted before it is revoked.
+    await new Promise((r) => setTimeout(r, SAVE_DEBOUNCE_MS + 300));
+    const file = join(dataDir, "fleeting.sqlite");
+    assert.ok(readFileSync(file).includes(tokenDigest(superseded)));
+
+    // Re-join revokes it; a hard kill immediately afterwards must not bring it back.
+    const rejoin = await joinWithProof(app, channelId, pair);
+    assert.equal(rejoin.status, 200);
+
+    const raw = readFileSync(file);
+    assert.equal(
+      raw.includes(tokenDigest(superseded)),
+      false,
+      "revoked bearer was still on disk after the response"
+    );
   });
 
   it("reaches disk from the debounced save, with no explicit flush", async () => {

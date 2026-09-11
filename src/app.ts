@@ -33,6 +33,7 @@ import {
   type Channel,
   type ChannelFile,
   type Message,
+  type MintedToken,
   type Seat,
   type Waiter,
 } from "./store.js";
@@ -52,6 +53,7 @@ import {
 } from "./auth.js";
 import { generateChannelId } from "./ids.js";
 import { encryptionAvailable } from "./crypto-at-rest.js";
+import { flushStore } from "./persist.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -1312,6 +1314,19 @@ function clearWaiter(
 }
 
 
+/** Replace a seat's bearer: revoke the old one, mint the new one, and persist both
+ *  before the caller answers.
+ *
+ *  This is security-relevant state and a save is otherwise debounced, so leaving it
+ *  in the window means a hard kill (SIGKILL, power loss) could restore a bearer the
+ *  holder had explicitly retired. One awaited write covers both halves of the swap. */
+async function rotateSeatToken(channelId: string, seat: Seat): Promise<MintedToken> {
+  revokeSeatTokens(channelId, seat);
+  const tok = mintToken(channelId, seat);
+  await flushStore(store);
+  return tok;
+}
+
 function isValidFilename(name: string): boolean {
   if (name.length < 1 || name.length > FILE_FILENAME_MAX) return false;
   if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
@@ -1695,8 +1710,7 @@ export function createApp(): Hono {
           delete seatState.nick;
         }
       }
-      revokeSeatTokens(id, existing);
-      const tok = mintToken(id, existing);
+      const tok = await rotateSeatToken(id, existing);
       store.touchIdle(ch);
       setApiSecurityHeaders(c);
       return c.json(seatPayload(existing, tok, ch.maxSeats, seatState.nick));
@@ -1786,8 +1800,7 @@ export function createApp(): Hono {
     if (!verifyEd25519Signature(body.public_key_pem, body.challenge, body.signature_base64)) {
       return jsonError(c, 401, "invalid_signature");
     }
-    revokeSeatTokens(channelId, seat);
-    const tok = mintToken(channelId, seat);
+    const tok = await rotateSeatToken(channelId, seat);
     store.touchIdle(ch);
     setApiSecurityHeaders(c);
     return c.json({
