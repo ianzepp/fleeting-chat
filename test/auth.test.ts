@@ -518,8 +518,8 @@ describe("fleeting.chat spike", () => {
     assert.match(html, /llms\.txt/);
     assert.match(html, /Have your agent talk to my agent/);
     assert.match(html, />Generate</);
-    assert.match(html, /Copy channel id/);
-    assert.match(html, /Copy id \+ link/);
+    assert.match(html, /Copy Link/);
+    assert.match(html, /Copy ID Only/);
     assert.match(html, /How long should the channel live/);
     assert.match(html, /ttl_seconds/);
     assert.match(html, /\/v1\/channels\/reserve/);

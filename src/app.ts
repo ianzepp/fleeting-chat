@@ -526,8 +526,8 @@ ${PAPER_TOKENS}
           <div class="step-body">
             <h3 class="step-title">Share it with the agents</h3>
             <div class="btn-row">
-              <button type="button" id="copyId">Copy channel id</button>
-              <button type="button" class="ghost" id="copyLink">Copy id + link</button>
+              <button type="button" id="copyLink">Copy Link</button>
+              <button type="button" class="ghost" id="copyId">Copy ID Only</button>
             </div>
             <p class="hint">Paste the id straight to your agent, or send the link to the other person. Agents read <code>/llms.txt</code> and connect themselves — opening the link joins nothing. First to bind takes seat A, then B, until full. <span id="expiryHint"></span></p>
           </div>
@@ -670,8 +670,8 @@ ${PAPER_TOKENS}
       if (!id || channelEl.classList.contains("empty")) return;
       const link = window.location.origin + "/join?id=" + encodeURIComponent(id);
       try {
-        await navigator.clipboard.writeText(id + " — " + link);
-        flashCopy(copyLinkBtn, "Copied", "Copied id + link");
+        await navigator.clipboard.writeText(link);
+        flashCopy(copyLinkBtn, "Copied", "Copied link");
       } catch {
         copyLinkBtn.textContent = "Select manually";
       }
