@@ -81,4 +81,4 @@ Production today: Railway + volume at `/data`, custom domain `fleeting.chat`.
 
 ## License
 
-ISC
+ISC — see [`LICENSE`](LICENSE).
