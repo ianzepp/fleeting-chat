@@ -1,60 +1,9 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL } from "../src/store.js";
-
-function freshStore() {
-  store.channels.clear();
-  store.tokens.clear();
-  store.challenges.clear();
-  store.agentTokens.clear();
-  store.agentChallenges.clear();
-  store.usedChannelIds.clear();
-  store.ipRate.clear();
-}
-
-function ed25519PemPair() {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    publicPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    privateKey,
-  };
-}
-
-async function json(app: ReturnType<typeof createApp>, path: string, init?: RequestInit) {
-  const res = await app.request(path, init);
-  const body = await res.json();
-  return { status: res.status, body, headers: res.headers };
-}
-
-async function mintAgentTokenViaApi(
-  app: ReturnType<typeof createApp>,
-  pair: ReturnType<typeof ed25519PemPair>
-) {
-  const ch = await json(app, "/v1/auth/agent/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ public_key_pem: pair.publicPem }),
-  });
-  assert.equal(ch.status, 200);
-  const challenge = ch.body.challenge as string;
-  const sig = sign(null, Buffer.from(challenge, "utf8"), pair.privateKey).toString("base64");
-  const tok = await json(app, "/v1/auth/agent/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      public_key_pem: pair.publicPem,
-      challenge,
-      signature_base64: sig,
-    }),
-  });
-  assert.equal(tok.status, 200);
-  assert.ok(tok.body.token);
-  assert.ok(tok.body.expires_at);
-  assert.equal(tok.body.seat, undefined);
-  return tok.body.token as string;
-}
+import { ed25519PemPair, freshStore, json, mintAgentTokenViaApi } from "./support.js";
 
 describe("fleeting.chat spike", () => {
   let prevEncKey: string | undefined;

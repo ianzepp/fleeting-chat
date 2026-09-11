@@ -9,7 +9,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test test/auth.test.ts test/persist.test.ts",
+    "test": "tsx --test test/auth.test.ts test/persist.test.ts test/security.test.ts",
     "smoke": "bash scripts/smoke.sh",
     "typecheck": "tsc --noEmit"
   },

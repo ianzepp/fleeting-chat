@@ -14,30 +14,7 @@ import { createApp } from "../src/app.js";
 import { store } from "../src/store.js";
 import { flushSync, loadStore, resolveDataDir } from "../src/persist.js";
 import { decryptUtf8, getEncryptionKey } from "../src/crypto-at-rest.js";
-
-function freshStore() {
-  store.channels.clear();
-  store.tokens.clear();
-  store.challenges.clear();
-  store.agentTokens.clear();
-  store.agentChallenges.clear();
-  store.usedChannelIds.clear();
-  store.ipRate.clear();
-}
-
-function ed25519PemPair() {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    publicPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    privateKey,
-  };
-}
-
-async function json(app: ReturnType<typeof createApp>, path: string, init?: RequestInit) {
-  const res = await app.request(path, init);
-  const body = await res.json();
-  return { status: res.status, body, headers: res.headers };
-}
+import { ed25519PemPair, freshStore, json } from "./support.js";
 
 describe("SQLite persistence", () => {
   let dataDir: string;

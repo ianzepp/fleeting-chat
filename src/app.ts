@@ -718,17 +718,51 @@ ${PAPER_TOKENS}
 </body>
 </html>`;
 
+const ALLOWED_ORIGIN_PROTOCOLS = new Set(["http:", "https:"]);
+
+function parseHttpOrigin(candidate: string): string | null {
+  try {
+    const url = new URL(candidate);
+    return ALLOWED_ORIGIN_PROTOCOLS.has(url.protocol) ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** PUBLIC_ORIGIN pins the origin printed in share links. Set it when a proxy
+ *  rewrites Host; invalid values are ignored rather than trusted. */
+function resolvePublicOrigin(): string | null {
+  const raw = process.env.PUBLIC_ORIGIN?.trim();
+  if (!raw) return null;
+  const origin = parseHttpOrigin(raw);
+  if (!origin) {
+    console.error("fleeting.chat: PUBLIC_ORIGIN ignored; expected an absolute http(s) URL");
+  }
+  return origin;
+}
+
+function normalizeForwardedProto(raw: string | undefined): "http" | "https" | null {
+  const value = raw?.split(",")[0]?.trim().toLowerCase();
+  return value === "http" || value === "https" ? value : null;
+}
+
+/** Origin for absolute links on the human share page.
+ *
+ *  X-Forwarded-Host is deliberately ignored: that page prints an agent
+ *  instruction the peer's agent is expected to follow, so a client-supplied host
+ *  would redirect that agent to an attacker-controlled origin. Only the scheme is
+ *  taken from forwarding headers, and the host comes from PUBLIC_ORIGIN or the
+ *  request's own Host.
+ */
 function requestOrigin(c: {
   req: { url: string; header: (n: string) => string | undefined };
 }): string {
-  const url = new URL(c.req.url);
-  const xfHost = c.req.header("x-forwarded-host") || c.req.header("host");
-  if (xfHost) {
-    const xfProto = c.req.header("x-forwarded-proto");
-    const proto = (xfProto || url.protocol.replace(":", "") || "https").split(",")[0].trim();
-    return `${proto}://${xfHost.split(",")[0].trim()}`;
-  }
-  return url.origin;
+  const configured = resolvePublicOrigin();
+  if (configured) return configured;
+  const host = c.req.header("host")?.trim();
+  const proto = normalizeForwardedProto(c.req.header("x-forwarded-proto"));
+  const fromHost = host && proto ? parseHttpOrigin(`${proto}://${host}`) : null;
+  return fromHost ?? new URL(c.req.url).origin;
 }
 
 function escapeHtml(s: string): string {
@@ -744,11 +778,10 @@ function joinShareHtml(channelId: string, origin: string): string {
   const id = escapeHtml(channelId);
   const joinUrl = `${origin}/join?id=${encodeURIComponent(channelId)}`;
   const llmsUrl = `${origin}/llms.txt?channel=${encodeURIComponent(channelId)}`;
-  const host = new URL(origin).host;
   const ogTitle = `fleeting.chat · ${channelId}`;
   const ogDesc =
     "Someone wants your agent in this room. This page connects no one — agents fetch /llms.txt?channel=… and follow that contract.";
-  const agentLine = `Agents: GET https://${host}/llms.txt?channel=${channelId} and follow that contract. Opening this page does not join the room.`;
+  const agentLine = `Agents: GET ${llmsUrl} and follow that contract. Opening this page does not join the room.`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

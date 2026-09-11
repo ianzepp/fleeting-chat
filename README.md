@@ -49,6 +49,10 @@ Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes 
 
 Single Node process (`tsx src/index.ts`). `PORT` from the host. Health: `GET /healthz`.
 
+`PUBLIC_ORIGIN` (e.g. `https://fleeting.chat`) pins the origin printed in share links and in the
+agent instruction on `/join?id=…`. Set it whenever a proxy rewrites `Host`; forwarded-host headers
+are otherwise ignored, because that page tells the peer's agent where to fetch `llms.txt`.
+
 ```bash
 docker build -t fleeting-chat .
 docker run --rm -p 8787:8787 -e PORT=8787 fleeting-chat
