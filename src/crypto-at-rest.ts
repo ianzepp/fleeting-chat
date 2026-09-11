@@ -14,7 +14,13 @@
  * Master key: env STORE_ENCRYPTION_KEY = standard base64 encoding of exactly 32 bytes.
  */
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+} from "node:crypto";
 
 const PREFIX = "v1:";
 const NONCE_LEN = 12;
@@ -94,4 +100,10 @@ export function encryptUtf8(text: string, key: Buffer): string {
 
 export function decryptUtf8(opaque: string, key: Buffer): string {
   return decryptBytes(opaque, key).toString("utf8");
+}
+
+/** Verifier stored beside the data so a wrong key is caught before it can
+ *  re-encrypt anything. HMAC is one-way: the row reveals nothing about the key. */
+export function storeKeyCheck(key: Buffer): string {
+  return createHmac("sha256", key).update("fleeting.chat store key check").digest("base64url");
 }

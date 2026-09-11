@@ -9,7 +9,8 @@ import {
   existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store } from "../src/store.js";
@@ -479,6 +480,81 @@ describe("SQLite persistence", () => {
   it("digests a legacy plaintext token row rather than dropping the session", () => {
     assert.equal(migrateStoredToken("legacy-bearer"), tokenDigest("legacy-bearer"));
     assert.equal(migrateStoredToken(tokenDigest("already")), tokenDigest("already"));
+  });
+
+  /** Rewrite the store file directly, to stand in for a database written by an
+   *  older release (for example one with no key-check row). */
+  async function editStoreFile(sql: string): Promise<void> {
+    const initSqlJs = (await import("sql.js")).default;
+    const wasmPath = join(
+      dirname(fileURLToPath(import.meta.resolve("sql.js"))),
+      "sql-wasm.wasm"
+    );
+    const SQL = await initSqlJs({ locateFile: () => wasmPath });
+    const file = join(dataDir, "fleeting.sqlite");
+    const db = new SQL.Database(readFileSync(file));
+    db.run(sql);
+    writeFileSync(file, Buffer.from(db.export()));
+    db.close();
+  }
+
+  async function seedEncryptedChannel(): Promise<string> {
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(create.status, 200, JSON.stringify(create.body));
+    const channelId = create.body.channel_id as string;
+    await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${create.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "secret hi" }),
+    });
+    flushSync(store);
+    freshStore();
+    return channelId;
+  }
+
+  async function assertSurvives(channelId: string): Promise<void> {
+    process.env.STORE_ENCRYPTION_KEY = testKeyB64;
+    freshStore();
+    await loadStore(store);
+    assert.equal(store.channels.get(channelId)!.messages[0].body, "secret hi");
+  }
+
+  it("refuses to load when the key is not the one that wrote the store", async () => {
+    const channelId = await seedEncryptedChannel();
+
+    process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+    await assert.rejects(loadStore(store), /does not match the key/);
+
+    await assertSurvives(channelId);
+  });
+
+  it("refuses to load an encrypted store with no key configured", async () => {
+    const channelId = await seedEncryptedChannel();
+
+    delete process.env.STORE_ENCRYPTION_KEY;
+    await assert.rejects(loadStore(store), /STORE_ENCRYPTION_KEY/);
+
+    await assertSurvives(channelId);
+  });
+
+  it("refuses unreadable ciphertext even without a key-check row", async () => {
+    const channelId = await seedEncryptedChannel();
+
+    // A database from an older release has ciphertext but no key verifier.
+    await editStoreFile("DELETE FROM meta");
+    process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+    await assert.rejects(loadStore(store), /cannot decrypt message/);
+
+    await assertSurvives(channelId);
   });
 
   it("crypto helpers roundtrip with STORE_ENCRYPTION_KEY", async () => {

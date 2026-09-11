@@ -18,6 +18,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  // Store integrity failures land here: exit rather than serve over data we could
+  // not read, so a mistyped STORE_ENCRYPTION_KEY cannot overwrite the store.
+  console.error("fleeting.chat: refusing to start:", err);
   process.exit(1);
 });

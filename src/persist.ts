@@ -35,6 +35,7 @@ import {
   encryptUtf8,
   getEncryptionKey,
   migrateStoredToken,
+  storeKeyCheck,
 } from "./crypto-at-rest.js";
 import type {
   AgentChallengeRecord,
@@ -46,6 +47,16 @@ import type {
   SeatState,
   Store,
 } from "./store.js";
+
+/** Thrown when the store on disk cannot be read as-is. Refusing to continue is
+ *  deliberate: starting empty and then writing would replace ciphertext with
+ *  nothing, or with data encrypted under the wrong key. */
+export class StoreIntegrityError extends Error {
+  override name = "StoreIntegrityError";
+}
+
+/** Meta row holding the verifier for the key the store was written with. */
+const KEY_CHECK_ROW = "store_key_check";
 
 const SAVE_DEBOUNCE_MS = 300;
 const SQLITE_NAME = "fleeting.sqlite";
@@ -164,6 +175,39 @@ function jsonStorePath(dataDir: string): string {
   return path.join(dataDir, JSON_NAME);
 }
 
+/** Recorded key verifier, or null when the database predates key checking. */
+function readKeyCheck(db: Database): string | null {
+  const table = db.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name='meta'`);
+  if (!table[0]) return null;
+  const stmt = db.prepare(`SELECT value FROM meta WHERE key = ?`);
+  try {
+    stmt.bind([KEY_CHECK_ROW]);
+    if (!stmt.step()) return null;
+    return (stmt.getAsObject() as { value: string }).value;
+  } finally {
+    stmt.free();
+  }
+}
+
+/** Refuse to proceed when the configured key is not the one this data was written
+ *  with. Rotation without re-encryption would silently destroy every ciphertext. */
+function assertKeyMatches(db: Database): Buffer | null {
+  const key = getEncryptionKey();
+  const recorded = readKeyCheck(db);
+  if (!recorded) return key;
+  if (!key) {
+    throw new StoreIntegrityError(
+      "STORE_ENCRYPTION_KEY is not set but the store has data encrypted with a key"
+    );
+  }
+  if (storeKeyCheck(key) !== recorded) {
+    throw new StoreIntegrityError(
+      "STORE_ENCRYPTION_KEY does not match the key this store was written with; refusing to load instead of replacing encrypted data"
+    );
+  }
+  return key;
+}
+
 function createSchema(db: Database): void {
   db.run(`
     CREATE TABLE IF NOT EXISTS channels (
@@ -227,6 +271,10 @@ function createSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS used_channel_ids (
       id TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 
@@ -236,7 +284,20 @@ function writeStoreSync(store: Store, dataDir: string): void {
   const db = new SQL.Database();
   try {
     createSchema(db);
+    const check = storeKeyCheck(key ?? Buffer.alloc(0));
+    const recorded = readKeyCheck(db);
+    if (recorded && recorded !== check) {
+      throw new StoreIntegrityError(
+        "refusing to write: STORE_ENCRYPTION_KEY differs from the key this store was written with"
+      );
+    }
     db.run("BEGIN");
+    if (key) {
+      db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run([
+        KEY_CHECK_ROW,
+        check,
+      ]);
+    }
 
     const insChannel = db.prepare(
       `INSERT INTO channels (
@@ -421,10 +482,9 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
     // Legacy JSON channels omit `encrypted` → plaintext already on disk.
     const encrypted = raw.encrypted === true;
     if (encrypted && !key) {
-      console.error(
-        `fleeting.chat: skipping encrypted channel ${raw.id}: STORE_ENCRYPTION_KEY missing/invalid`
+      throw new StoreIntegrityError(
+        `channel ${raw.id} is encrypted but STORE_ENCRYPTION_KEY is missing`
       );
-      continue;
     }
 
     const files = new Map<string, ChannelFile>();
@@ -446,9 +506,8 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
           seat: migrateSeatId(f.seat),
         });
       } catch (err) {
-        console.error(
-          `fleeting.chat: failed to load file ${fid} on channel ${raw.id}:`,
-          err
+        throw new StoreIntegrityError(
+          `cannot decrypt file ${fid} on channel ${raw.id}: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     }
@@ -463,9 +522,8 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
           from: migrateSeatId(m.from),
         });
       } catch (err) {
-        console.error(
-          `fleeting.chat: failed to decrypt message ${m.id} on channel ${raw.id}:`,
-          err
+        throw new StoreIntegrityError(
+          `cannot decrypt message ${m.id} on channel ${raw.id}: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     }
@@ -523,6 +581,8 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
   const buf = readFileSync(file);
   const db = new SQL.Database(buf);
   try {
+    // Fail before any row is read if the configured key is not the one that wrote this.
+    assertKeyMatches(db);
     const data: PersistedStore = {
       version: 1,
       channels: [],
@@ -819,15 +879,11 @@ export async function loadStore(store: Store): Promise<void> {
       return;
     }
   } catch (err) {
-    console.error(
-      "fleeting.chat: failed to load persistence, starting empty:",
-      err
+    // Propagate: an empty in-memory store over a file that still exists would be
+    // overwritten by the next write, which is how encrypted data used to vanish.
+    if (err instanceof StoreIntegrityError) throw err;
+    throw new StoreIntegrityError(
+      `failed to read the store in ${dataDir}: ${err instanceof Error ? err.message : String(err)}`
     );
-    store.channels.clear();
-    store.tokens.clear();
-    store.challenges.clear();
-    store.agentTokens.clear();
-    store.agentChallenges.clear();
-    store.usedChannelIds.clear();
   }
 }

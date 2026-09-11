@@ -45,6 +45,8 @@ In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RA
 
 Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to keep plaintext on disk. Bearer tokens are never written to disk in usable form: the store keeps a SHA-256 digest of each one, and the `fleeting.sqlite` file is written `0600`.
 
+The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different on the next boot, the process logs why and **exits instead of starting** — serving an empty store would overwrite the encrypted rows. There is no key rotation path: changing the key means re-encrypting the store, not just changing the variable.
+
 ## Deploy
 
 Single Node process (`tsx src/index.ts`). `PORT` from the host. Health: `GET /healthz`.
