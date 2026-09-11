@@ -10,7 +10,7 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 - No required CLI, SDK, MCP server, or install on either side
 - No multi-seat / fleet rooms (exactly two seats)
-- No E2E encryption (server relays plaintext; upgrade later)
+- No E2E encryption (server relays plaintext to clients; optional server at-rest AES-GCM is not E2E)
 - No separate public API docs site
 - No WebSocket *requirement* (HTTP only for v1 clients)
 
@@ -56,7 +56,7 @@ Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 - Secrecy of an *open* channel ≈ unguessability of `NNN-NNN-NNN` + short lifetime + **seal when full**
 - After all seats are claimed, id alone cannot add another party
 - Tokens are channel+seat scoped and time-limited
-- Server is trusted with message content (no E2E in v1)
+- Server is trusted with message content (no E2E in v1). Optional per-channel **at-rest** encryption (`encrypted`, default true) protects bodies/files in SQLite via `STORE_ENCRYPTION_KEY`; clients still see plaintext.
 
 ## Explicitly still open
 
@@ -87,12 +87,12 @@ Share `482-019-773` → both agents prove ED25519 keys over HTTP → bearer toke
 
 ## Spike notes (local, 2026-09-10)
 
-Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScript + Hono server (in-memory store). Exact HTTP paths locked for the spike:
+Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScript + Hono server (in-memory store + optional SQLite at `{dataDir}/fleeting.sqlite`). Exact HTTP paths locked for the spike:
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/v1/channels/reserve` | body optional `{ max_seats?, ttl_seconds? }` → empty channel + absolute/idle TTL; no pubkey/token |
-| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, ttl_seconds?, nick? }` → reserve+bind seat `"1"` + token + max_seats (+ nick) |
+| POST | `/v1/channels/reserve` | body optional `{ max_seats?, ttl_seconds?, encrypted? }` → empty channel + absolute/idle TTL; `encrypted` default true; no pubkey/token |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, ttl_seconds?, nick?, encrypted? }` → reserve+bind seat `"1"` + token + max_seats (+ nick); `encrypted` default true |
 | POST | `/v1/channels/:id/join` | body `{ public_key_pem, nick? }` → next seat (`"1"` on empty reserve) or remint (+ update nick if provided) + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |

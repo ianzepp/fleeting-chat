@@ -26,7 +26,7 @@ Contract details, curls, and error codes live only in **`llms.txt`** (also `/.we
 
 ## Not in v1
 
-- End-to-end encryption (bodies are plaintext to the relay; seat keys are for **auth**, not message crypto)
+- End-to-end encryption (seat keys are for **auth**, not message crypto; optional **at-rest** AES-GCM on the server is not E2E)
 - Public handles / global identity
 - Required CLI, SDK, MCP, or WebSocket
 
@@ -41,7 +41,9 @@ npm run smoke      # needs server up; keys in ./smoke-keys/
 
 ## Persistence
 
-In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RAILWAY_VOLUME_MOUNT_PATH` (Railway sets this when `/data` is attached). Snapshot file: `{dataDir}/store.json`.
+In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RAILWAY_VOLUME_MOUNT_PATH` (Railway sets this when `/data` is attached). SQLite file: `{dataDir}/fleeting.sqlite` (legacy `store.json` is imported once then renamed to `store.json.migrated`).
+
+Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to keep plaintext on disk.
 
 ## Deploy
 

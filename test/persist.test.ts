@@ -1,12 +1,19 @@
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store } from "../src/store.js";
 import { flushSync, loadStore, resolveDataDir } from "../src/persist.js";
+import { decryptUtf8, getEncryptionKey } from "../src/crypto-at-rest.js";
 
 function freshStore() {
   store.channels.clear();
@@ -32,14 +39,18 @@ async function json(app: ReturnType<typeof createApp>, path: string, init?: Requ
   return { status: res.status, body, headers: res.headers };
 }
 
-describe("JSON persistence", () => {
+describe("SQLite persistence", () => {
   let dataDir: string;
   let prevDataDir: string | undefined;
   let prevRailway: string | undefined;
+  let prevEncKey: string | undefined;
+  let testKeyB64: string;
 
   before(() => {
     prevDataDir = process.env.DATA_DIR;
     prevRailway = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+    prevEncKey = process.env.STORE_ENCRYPTION_KEY;
+    testKeyB64 = randomBytes(32).toString("base64");
   });
 
   after(() => {
@@ -47,6 +58,8 @@ describe("JSON persistence", () => {
     else process.env.DATA_DIR = prevDataDir;
     if (prevRailway === undefined) delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
     else process.env.RAILWAY_VOLUME_MOUNT_PATH = prevRailway;
+    if (prevEncKey === undefined) delete process.env.STORE_ENCRYPTION_KEY;
+    else process.env.STORE_ENCRYPTION_KEY = prevEncKey;
     freshStore();
   });
 
@@ -54,6 +67,7 @@ describe("JSON persistence", () => {
     dataDir = mkdtempSync(join(tmpdir(), "fleeting-persist-"));
     process.env.DATA_DIR = dataDir;
     delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
+    process.env.STORE_ENCRYPTION_KEY = testKeyB64;
     freshStore();
   });
 
@@ -76,8 +90,7 @@ describe("JSON persistence", () => {
     process.env.DATA_DIR = dataDir;
   });
 
-
-  it("flushSync drains a pending debounced save", async () => {
+  it("flushSync drains a pending debounced save to fleeting.sqlite", async () => {
     const app = createApp();
     const { publicPem } = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
@@ -86,16 +99,16 @@ describe("JSON persistence", () => {
       body: JSON.stringify({ public_key_pem: publicPem, ttl_seconds: 3600 }),
     });
     assert.equal(created.status, 200);
-    const file = join(dataDir, "store.json");
-    // Debounce may not have fired yet; flushSync must force the write.
+    const file = join(dataDir, "fleeting.sqlite");
     flushSync(store);
     assert.equal(existsSync(file), true);
-    const disk = JSON.parse(readFileSync(file, "utf8"));
-    assert.equal(disk.channels.length, 1);
-    assert.equal(disk.channels[0].id, created.body.channel_id);
+    assert.ok(existsSync(file));
+    freshStore();
+    await loadStore(store);
+    assert.ok(store.channels.has(created.body.channel_id as string));
   });
 
-  it("roundtrip channel + message + token + file via flushSync/loadStore", async () => {
+  it("encrypted roundtrip: bodies/files decrypt into memory; API stays plaintext", async () => {
     const app = createApp();
     const a = ed25519PemPair();
     const b = ed25519PemPair();
@@ -103,9 +116,10 @@ describe("JSON persistence", () => {
     const create = await json(app, "/v1/channels", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "alice" }),
+      body: JSON.stringify({ public_key_pem: a.publicPem, nick: "alice", encrypted: true }),
     });
     assert.equal(create.status, 200);
+    assert.equal(create.body.encrypted, true);
     const channelId = create.body.channel_id as string;
     const tokenA = create.body.token as string;
 
@@ -122,7 +136,7 @@ describe("JSON persistence", () => {
         Authorization: `Bearer ${tokenA}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ body: "persisted hi" }),
+      body: JSON.stringify({ body: "secret hi" }),
     });
     assert.equal(send.status, 201);
 
@@ -143,42 +157,119 @@ describe("JSON persistence", () => {
     const fileId = up.body.file_id as string;
 
     flushSync(store);
-    const disk = join(dataDir, "store.json");
+    const disk = join(dataDir, "fleeting.sqlite");
     assert.ok(existsSync(disk));
-    const raw = JSON.parse(readFileSync(disk, "utf8")) as {
-      channels: Array<{ id: string; messages: unknown[]; files: Record<string, { bytes: string }> }>;
-      tokens: unknown[];
-      usedChannelIds: string[];
-    };
-    assert.ok(raw.channels.some((c) => c.id === channelId));
-    assert.ok(raw.usedChannelIds.includes(channelId));
-    assert.ok(raw.tokens.length >= 1);
+    // Raw sqlite bytes should not contain the plaintext body as a bare UTF-8 string.
+    const rawBytes = readFileSync(disk);
+    assert.equal(rawBytes.includes(Buffer.from("secret hi", "utf8")), false);
 
-    // Simulate restart
     freshStore();
     assert.equal(store.channels.size, 0);
     await loadStore(store);
 
     const ch = store.channels.get(channelId);
     assert.ok(ch);
+    assert.equal(ch!.encrypted, true);
     assert.equal(ch!.waiters.length, 0);
     assert.equal(ch!.seats["1"]?.nick, "alice");
     assert.equal(ch!.seats["2"]?.nick, "bob");
     assert.equal(ch!.messages.length, 1);
-    assert.equal(ch!.messages[0].body, "persisted hi");
+    assert.equal(ch!.messages[0].body, "secret hi");
     assert.ok(ch!.files.has(fileId));
     assert.equal(ch!.files.get(fileId)!.bytes.toString("utf8"), "hello-file");
     assert.ok(store.usedChannelIds.has(channelId));
     assert.ok(store.tokens.has(tokenA));
 
-    // Live API still works after reload
     const app2 = createApp();
     const poll = await json(app2, `/v1/channels/${channelId}/messages?after=0`, {
       headers: { Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(poll.status, 200);
     assert.equal(poll.body.messages.length, 1);
-    assert.equal(poll.body.messages[0].body, "persisted hi");
+    assert.equal(poll.body.messages[0].body, "secret hi");
+  });
+
+  it("plaintext channel when encrypted:false (no ciphertext on disk)", async () => {
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        public_key_pem: a.publicPem,
+        encrypted: false,
+        ttl_seconds: 3600,
+      }),
+    });
+    assert.equal(create.status, 200);
+    assert.equal(create.body.encrypted, false);
+    const channelId = create.body.channel_id as string;
+    const tokenA = create.body.token as string;
+
+    const send = await json(app, `/v1/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenA}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body: "plain hi" }),
+    });
+    assert.equal(send.status, 201);
+
+    flushSync(store);
+    const rawBytes = readFileSync(join(dataDir, "fleeting.sqlite"));
+    assert.equal(rawBytes.includes(Buffer.from("plain hi", "utf8")), true);
+
+    freshStore();
+    await loadStore(store);
+    const ch = store.channels.get(channelId);
+    assert.ok(ch);
+    assert.equal(ch!.encrypted, false);
+    assert.equal(ch!.messages[0].body, "plain hi");
+  });
+
+  it("encrypted:true without STORE_ENCRYPTION_KEY → 503 encryption_unavailable", async () => {
+    delete process.env.STORE_ENCRYPTION_KEY;
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, encrypted: true }),
+    });
+    assert.equal(create.status, 503);
+    assert.equal(create.body.error, "encryption_unavailable");
+
+    const reserve = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ encrypted: true }),
+    });
+    assert.equal(reserve.status, 503);
+    assert.equal(reserve.body.error, "encryption_unavailable");
+
+    // Opt-out still works without a key.
+    const plain = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ encrypted: false }),
+    });
+    assert.equal(plain.status, 200);
+    assert.equal(plain.body.encrypted, false);
+
+    // restore for afterEach flush
+    process.env.STORE_ENCRYPTION_KEY = testKeyB64;
+  });
+
+  it("default encrypted is true when omitted", async () => {
+    const app = createApp();
+    const reserve = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(reserve.status, 200);
+    assert.equal(reserve.body.encrypted, true);
   });
 
   it("skips expired channels and tokens on load", async () => {
@@ -204,7 +295,6 @@ describe("JSON persistence", () => {
 
     assert.equal(store.channels.has(channelId), false);
     assert.equal(store.tokens.has(tokenA), false);
-    // used ids retained so ids are not reused
     assert.ok(store.usedChannelIds.has(channelId));
   });
 
@@ -239,7 +329,8 @@ describe("JSON persistence", () => {
     assert.equal(store.agentChallenges.has(challenge), false); // consumed
   });
 
-  it("migrates legacy letter seats A–H to \"1\"–\"8\" on load", async () => {
+  it("migrates legacy letter seats A–H to \"1\"–\"8\" on load from store.json", async () => {
+    // No sqlite yet — write legacy JSON then loadStore migrates.
     const now = Date.now();
     const disk = {
       version: 1,
@@ -251,6 +342,7 @@ describe("JSON persistence", () => {
           idleExpiresAt: now + 3600_000,
           idleTtlMs: 3600_000,
           maxSeats: 2,
+          // no encrypted flag → plaintext legacy
           seats: {
             A: {
               publicKeyPem: "pem-a",
@@ -299,18 +391,31 @@ describe("JSON persistence", () => {
       agentChallenges: [],
       usedChannelIds: ["111-222-333"],
     };
-    const path = join(dataDir, "store.json");
-    writeFileSync(path, JSON.stringify(disk), "utf8");
+    const jsonPath = join(dataDir, "store.json");
+    writeFileSync(jsonPath, JSON.stringify(disk), "utf8");
     freshStore();
     await loadStore(store);
     const ch = store.channels.get("111-222-333");
     assert.ok(ch);
+    assert.equal(ch!.encrypted, false);
     assert.equal(ch!.seats["1"]?.nick, "alice");
     assert.equal(ch!.seats["2"]?.nick, "bob");
     assert.ok(!("A" in ch!.seats));
     assert.equal(ch!.messages[0].from, "1");
+    assert.equal(ch!.messages[0].body, "hi");
     assert.equal(ch!.files.get("f1")!.seat, "1");
     assert.equal(store.tokens.get("tok-legacy")!.seat, "1");
+    assert.ok(existsSync(join(dataDir, "fleeting.sqlite")));
+    assert.equal(existsSync(jsonPath), false);
+    assert.ok(existsSync(join(dataDir, "store.json.migrated")));
   });
 
+  it("crypto helpers roundtrip with STORE_ENCRYPTION_KEY", async () => {
+    const { encryptUtf8 } = await import("../src/crypto-at-rest.js");
+    const key = getEncryptionKey();
+    assert.ok(key);
+    const opaque = encryptUtf8("hello", key!);
+    assert.match(opaque, /^v1:/);
+    assert.equal(decryptUtf8(opaque, key!), "hello");
+  });
 });

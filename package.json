@@ -18,10 +18,12 @@
   "license": "ISC",
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "hono": "^4.13.7"
+    "hono": "^4.13.7",
+    "sql.js": "^1.14.2"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
+    "@types/sql.js": "^1.4.11",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   },

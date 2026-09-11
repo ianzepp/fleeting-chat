@@ -48,6 +48,7 @@ import {
   resolveAgentBearer,
 } from "./auth.js";
 import { generateChannelId } from "./ids.js";
+import { encryptionAvailable } from "./crypto-at-rest.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -335,6 +336,26 @@ ${PAPER_TOKENS}
       font-size: 0.78rem;
       line-height: 1.5;
     }
+    .encrypt-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.55rem;
+      margin: 0.85rem 0 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    .encrypt-row input {
+      margin-top: 0.2rem;
+      accent-color: var(--ink);
+      width: 1rem;
+      height: 1rem;
+      flex-shrink: 0;
+    }
+    .encrypt-row span {
+      color: var(--ink-faint);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
 
     button {
       font: inherit;
@@ -508,7 +529,11 @@ ${PAPER_TOKENS}
         <li class="step active" id="step2">
           <div class="step-body">
             <h3 class="step-title">Generate your private channel</h3>
-            <div class="btn-row">
+            <label class="encrypt-row" for="encryptAtRest">
+              <input type="checkbox" id="encryptAtRest" checked />
+              <span>Encrypt messages at rest on the server (not end-to-end).</span>
+            </label>
+            <div class="btn-row" style="margin-top:0.85rem">
               <button type="button" id="generate">Generate</button>
             </div>
             <p id="err" role="alert"></p>
@@ -552,6 +577,7 @@ ${PAPER_TOKENS}
     const copyIdBtn = document.getElementById("copyId");
     const channelEl = document.getElementById("channel");
     const errEl = document.getElementById("err");
+    const encryptEl = document.getElementById("encryptAtRest");
     const maxSeatsEl = document.getElementById("maxSeats");
     const seatCountEl = document.getElementById("seatCount");
     const seatNoteEl = document.getElementById("seatNote");
@@ -631,10 +657,11 @@ ${PAPER_TOKENS}
       try {
         const max_seats = Number(maxSeatsEl.value);
         const ttl = currentTtl();
+        const encrypted = !!(encryptEl && encryptEl.checked);
         const res = await fetch("/v1/channels/reserve", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ max_seats, ttl_seconds: ttl.seconds }),
+          body: JSON.stringify({ max_seats, ttl_seconds: ttl.seconds, encrypted }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -1048,6 +1075,13 @@ function parseNick(raw: unknown): { ok: true; nick?: string } | { ok: false } {
   return { ok: true, nick: trimmed };
 }
 
+/** Optional encrypted flag on reserve/create. Omit/null → true. Must be boolean if present. */
+function parseEncrypted(raw: unknown): { ok: true; encrypted: boolean } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true, encrypted: true };
+  if (typeof raw !== "boolean") return { ok: false };
+  return { ok: true, encrypted: raw };
+}
+
 function seatPayload(seat: Seat, tok: { token: string; expiresAt: number }, maxSeats: number, nick?: string) {
   const out: Record<string, unknown> = {
     seat,
@@ -1304,8 +1338,8 @@ export function createApp(): Hono {
     const ip = clientIp(c);
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
-    // Body optional: empty → defaults; otherwise JSON with optional max_seats
-    let body: { max_seats?: unknown; ttl_seconds?: unknown } = {};
+    // Body optional: empty → defaults; otherwise JSON with optional max_seats / ttl / encrypted
+    let body: { max_seats?: unknown; ttl_seconds?: unknown; encrypted?: unknown } = {};
     const cl = c.req.header("content-length");
     if (cl) {
       const n = parseInt(cl, 10);
@@ -1324,7 +1358,7 @@ export function createApp(): Hono {
     }
     if (raw.trim()) {
       try {
-        body = JSON.parse(raw) as { max_seats?: unknown; ttl_seconds?: unknown };
+        body = JSON.parse(raw) as { max_seats?: unknown; ttl_seconds?: unknown; encrypted?: unknown };
       } catch {
         return jsonError(c, 400, "invalid_json");
       }
@@ -1335,6 +1369,16 @@ export function createApp(): Hono {
     const maxSeats = maxParsed.value;
     const ttlParsed = parseChannelTtlSeconds(body.ttl_seconds);
     if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
+    const encParsed = parseEncrypted(body.encrypted);
+    if (!encParsed.ok) return jsonError(c, 400, "invalid_encrypted");
+    if (encParsed.encrypted && !encryptionAvailable()) {
+      return jsonError(
+        c,
+        503,
+        "encryption_unavailable",
+        "STORE_ENCRYPTION_KEY required for encrypted channels"
+      );
+    }
     const now = Date.now();
     let id: string;
     try {
@@ -1347,6 +1391,7 @@ export function createApp(): Hono {
       createdAt: now,
       ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
+      encrypted: encParsed.encrypted,
       seats: {},
       messages: [],
       nextMsgSeq: 1,
@@ -1359,6 +1404,7 @@ export function createApp(): Hono {
     return c.json({
       channel_id: id,
       max_seats: maxSeats,
+      encrypted: ch.encrypted,
       ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
       idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
@@ -1378,6 +1424,7 @@ export function createApp(): Hono {
       max_seats?: unknown;
       ttl_seconds?: unknown;
       nick?: unknown;
+      encrypted?: unknown;
     }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
@@ -1394,6 +1441,16 @@ export function createApp(): Hono {
     if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
     const nickParsed = parseNick(body.nick);
     if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
+    const encParsed = parseEncrypted(body.encrypted);
+    if (!encParsed.ok) return jsonError(c, 400, "invalid_encrypted");
+    if (encParsed.encrypted && !encryptionAvailable()) {
+      return jsonError(
+        c,
+        503,
+        "encryption_unavailable",
+        "STORE_ENCRYPTION_KEY required for encrypted channels"
+      );
+    }
     const maxSeats = maxParsed.value;
     const now = Date.now();
     let id: string;
@@ -1414,6 +1471,7 @@ export function createApp(): Hono {
       createdAt: now,
       ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
+      encrypted: encParsed.encrypted,
       seats: {
         "1": seat1,
       },
@@ -1434,6 +1492,7 @@ export function createApp(): Hono {
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
       ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       max_seats: maxSeats,
+      encrypted: ch.encrypted,
     };
     if (nickParsed.nick !== undefined) resp.nick = nickParsed.nick;
     return c.json(resp);

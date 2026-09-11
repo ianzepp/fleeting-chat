@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL } from "../src/store.js";
 
@@ -57,6 +57,19 @@ async function mintAgentTokenViaApi(
 }
 
 describe("fleeting.chat spike", () => {
+  let prevEncKey: string | undefined;
+
+  before(() => {
+    prevEncKey = process.env.STORE_ENCRYPTION_KEY;
+    // Default encrypted:true on create/reserve requires a 32-byte master key.
+    process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+  });
+
+  after(() => {
+    if (prevEncKey === undefined) delete process.env.STORE_ENCRYPTION_KEY;
+    else process.env.STORE_ENCRYPTION_KEY = prevEncKey;
+  });
+
   it("create + join + send + poll", async () => {
     freshStore();
     const app = createApp();
