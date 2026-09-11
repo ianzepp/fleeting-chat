@@ -510,6 +510,21 @@ describe("fleeting.chat spike", () => {
     assert.equal(w.status, 200);
   });
 
+  it("static noise routes: robots favicon and cheeky wp 402", async () => {
+    const app = createApp();
+    const robots = await app.request("/robots.txt");
+    assert.equal(robots.status, 200);
+    assert.match(await robots.text(), /Allow:\s*\//);
+
+    const ico = await app.request("/favicon.ico");
+    assert.equal(ico.status, 200);
+    assert.match(ico.headers.get("content-type") || "", /svg/);
+
+    const wp = await app.request("/wp-admin/install.php");
+    assert.equal(wp.status, 402);
+    assert.match(await wp.text(), /fleeting\.chat/i);
+  });
+
   it("landing page 200 contains Generate", async () => {
     const app = createApp();
     const res = await app.request("/");

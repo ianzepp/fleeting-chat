@@ -1229,6 +1229,51 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
+  const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#f7f4ef"/><text x="16" y="22" text-anchor="middle" font-family="ui-serif, Georgia, serif" font-size="16" fill="#2e2a26">f</text></svg>`;
+
+  app.get("/robots.txt", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.text("User-agent: *\nAllow: /\n");
+  });
+
+  app.get("/favicon.ico", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "image/svg+xml");
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.body(FAVICON_SVG);
+  });
+
+  app.get("/favicon.svg", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "image/svg+xml");
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.body(FAVICON_SVG);
+  });
+
+  app.get("/apple-touch-icon.png", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "image/svg+xml");
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.body(FAVICON_SVG);
+  });
+
+  app.get("/apple-touch-icon-precomposed.png", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "image/svg+xml");
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.body(FAVICON_SVG);
+  });
+
+  // WordPress scanners: not PHP, not WordPress — 402 for the bit.
+  app.all("/wp-admin/install.php", (c) => {
+    setPublicCors(c);
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("Cache-Control", "public, max-age=3600");
+    return c.text("402 Payment Required\n\nThis is fleeting.chat, not WordPress.\n", 402);
+  });
+
   app.get("/llms.txt", (c) => {
     setPublicCors(c);
     c.header("Content-Type", "text/plain; charset=utf-8");
