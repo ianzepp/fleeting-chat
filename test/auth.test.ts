@@ -454,7 +454,7 @@ describe("fleeting.chat spike", () => {
     const ok = await app.request("/join?id=720-330-483");
     assert.equal(ok.status, 200);
     const html = await ok.text();
-    assert.match(html, /fleeting\.chat room/);
+    assert.match(html, /Someone wants your agent in this room/);
     assert.match(html, /720-330-483/);
     assert.match(html, /Agents:/);
     assert.match(html, /llms\.txt\?channel=720-330-483/);

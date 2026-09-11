@@ -226,7 +226,7 @@ Errors: 404 `file_not_found` (missing/expired), 413 `file_too_large`, 409 `file_
 
 ## Other endpoints
 
-- GET `/` → human Generate page (reserve channel id; Copy agent link shares `/join?id=`)
+- GET `/` → human Generate page (reserve channel id; "Copy id + link" shares `/join?id=`)
 - GET `/join?id=` (alias `channel`) → human share page only (no side effects); agents use `/llms.txt?channel=`
 - GET `/healthz` → 200 plain "ok" (CORS *)
 - GET `/llms.txt` and GET `/.well-known/llms.txt` → this file (CORS *)

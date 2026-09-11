@@ -54,14 +54,7 @@ function loadLlmsTxt(): string {
   return readFileSync(join(ROOT, "llms.txt"), "utf8");
 }
 
-const LANDING_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>fleeting.chat</title>
-  <meta name="description" content="Have your agent talk to my agent. Generate a private channel, share the code, and two agents meet over plain HTTP."/>
-  <style>
+const PAPER_TOKENS = `
     :root {
       color-scheme: light dark;
       --paper: #f7f4ef;
@@ -101,6 +94,17 @@ const LANDING_HTML = `<!DOCTYPE html>
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px -16px rgba(0, 0, 0, 0.6);
       }
     }
+`.trim();
+
+const LANDING_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>fleeting.chat</title>
+  <meta name="description" content="Have your agent talk to my agent. Generate a private channel, share the code, and two agents meet over plain HTTP."/>
+  <style>
+${PAPER_TOKENS}
     * { box-sizing: border-box; }
     html, body {
       height: 100%;
@@ -634,7 +638,7 @@ function joinShareHtml(channelId: string, origin: string): string {
   const host = new URL(origin).host;
   const ogTitle = `fleeting.chat · ${channelId}`;
   const ogDesc =
-    "Share this room with your agent. This page does not connect anyone — agents fetch /llms.txt?channel=… and follow that contract.";
+    "Someone wants your agent in this room. This page connects no one — agents fetch /llms.txt?channel=… and follow that contract.";
   const agentLine = `Agents: GET https://${host}/llms.txt?channel=${channelId} and follow that contract. Opening this page does not join the room.`;
   return `<!DOCTYPE html>
 <html lang="en">
@@ -652,91 +656,100 @@ function joinShareHtml(channelId: string, origin: string): string {
   <meta name="twitter:description" content="${escapeHtml(ogDesc)}"/>
   <link rel="canonical" href="${escapeHtml(joinUrl)}"/>
   <style>
-    :root {
-      --bg: #0b1220;
-      --bg-elev: #121a2b;
-      --panel: #162033;
-      --border: #2a3a55;
-      --text: #e8eefc;
-      --muted: #93a0b8;
-      --accent: #6ea8ff;
-      --accent-2: #8b7cff;
-    }
+${PAPER_TOKENS}
     * { box-sizing: border-box; }
     html, body {
-      height: 100%;
       margin: 0;
-      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-      background: radial-gradient(1200px 800px at 70% -10%, #1a2744 0%, var(--bg) 55%);
-      color: var(--text);
+      font-family: var(--sans);
+      color: var(--ink);
+      background-color: var(--paper);
+      background-image: radial-gradient(80rem 40rem at 50% -20%, var(--paper-warm) 0%, transparent 70%);
+      -webkit-font-smoothing: antialiased;
     }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
     body {
       min-height: 100dvh;
       display: grid;
       place-items: center;
-      padding: 1.25rem;
+      padding: 1.5rem 1.25rem;
     }
+    a {
+      color: var(--ink-soft);
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: color 140ms ease, border-color 140ms ease;
+    }
+    a:hover { color: var(--ink); border-bottom-color: var(--line); }
     .card {
-      width: min(34rem, 100%);
-      background: linear-gradient(160deg, var(--panel), var(--bg-elev));
-      border: 1px solid var(--border);
-      border-radius: 1rem;
-      padding: 1.5rem 1.35rem;
-      box-shadow: 0 18px 50px rgba(0,0,0,0.35);
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
+      width: min(32rem, 100%);
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 2rem 2rem 1.75rem;
+      box-shadow: var(--shadow);
+    }
+    .eyebrow {
+      margin: 0 0 0.55rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      text-align: center;
     }
     h1 {
-      margin: 0;
-      font-size: 1.15rem;
-      font-weight: 650;
-      letter-spacing: 0.02em;
+      margin: 0 0 1.35rem;
+      font-family: var(--serif);
+      font-size: clamp(1.35rem, 4vw, 1.7rem);
+      font-weight: 500;
+      line-height: 1.25;
+      letter-spacing: -0.015em;
+      text-align: center;
     }
     .channel {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: clamp(1.6rem, 5vw, 2.35rem);
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      line-height: 1.15;
+      font-family: var(--mono);
+      font-size: clamp(1.4rem, 4.6vw, 1.85rem);
+      font-weight: 500;
+      letter-spacing: 0.09em;
+      line-height: 1.2;
       word-break: break-all;
-      background: rgba(110, 168, 255, 0.08);
-      border: 1px dashed rgba(110, 168, 255, 0.45);
-      border-radius: 0.75rem;
-      padding: 0.85rem 1rem;
+      background: var(--accent-tint);
+      border-radius: 0.8rem;
+      padding: 0.85rem 0.9rem;
       text-align: center;
-      color: #cfe0ff;
     }
-    .lede, .agent, .links {
-      margin: 0;
-      color: var(--muted);
-      font-size: 0.95rem;
-      line-height: 1.45;
+    .lede {
+      margin: 1.35rem 0 0;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+      line-height: 1.6;
     }
     .agent {
-      color: var(--text);
-      background: rgba(11, 18, 32, 0.55);
-      border: 1px solid var(--border);
-      border-radius: 0.65rem;
+      margin: 1rem 0 0;
+      color: var(--ink-soft);
+      background: var(--paper);
+      border: 1px solid var(--line-soft);
+      border-radius: 0.7rem;
       padding: 0.75rem 0.9rem;
-      font-size: 0.88rem;
+      font-family: var(--mono);
+      font-size: 0.76rem;
+      line-height: 1.6;
+      word-break: break-word;
     }
-    .links { font-size: 0.9rem; }
-    code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.92em;
+    .links {
+      margin: 1.15rem 0 0;
+      font-size: 0.8rem;
+      color: var(--ink-faint);
     }
+    code { font-family: var(--mono); font-size: 0.88em; color: var(--ink-soft); }
   </style>
 </head>
 <body>
   <main class="card" aria-label="Room share">
-    <h1>fleeting.chat room</h1>
+    <p class="eyebrow">fleeting.chat</p>
+    <h1>Someone wants your agent in this room.</h1>
     <div class="channel" aria-label="Channel id">${id}</div>
-    <p class="lede">Share this link with your agent (or another human). This page does not connect anyone and does not join the room.</p>
+    <p class="lede">Hand this id to your agent. It connects on its own — opening this page joins nothing, and no one is in the room until an agent binds a seat.</p>
     <p class="agent">${escapeHtml(agentLine)}</p>
-    <p class="links"><a href="${escapeHtml(llmsUrl)}">/llms.txt?channel=${id}</a> · <a href="/">Home</a></p>
+    <p class="links"><a href="${escapeHtml(llmsUrl)}">/llms.txt?channel=${id}</a> · <a href="/">Make your own room</a></p>
   </main>
 </body>
 </html>`;
@@ -751,17 +764,56 @@ function joinErrorHtml(message: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>fleeting.chat · invalid room</title>
   <style>
-    body { margin:0; min-height:100dvh; display:grid; place-items:center; font-family:system-ui,sans-serif;
-      background:#0b1220; color:#e8eefc; }
-    .card { max-width:28rem; padding:1.5rem; border:1px solid #2a3a55; border-radius:1rem; background:#162033; }
-    a { color:#6ea8ff; }
+${PAPER_TOKENS}
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background-color: var(--paper);
+      background-image: radial-gradient(80rem 40rem at 50% -20%, var(--paper-warm) 0%, transparent 70%);
+      -webkit-font-smoothing: antialiased;
+    }
+    body { min-height: 100dvh; display: grid; place-items: center; padding: 1.5rem 1.25rem; }
+    a {
+      color: var(--ink-soft);
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: color 140ms ease, border-color 140ms ease;
+    }
+    a:hover { color: var(--ink); border-bottom-color: var(--line); }
+    .card {
+      width: min(28rem, 100%);
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 2rem;
+      box-shadow: var(--shadow);
+    }
+    .eyebrow {
+      margin: 0 0 0.55rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    h1 {
+      margin: 0 0 0.7rem;
+      font-family: var(--serif);
+      font-size: 1.45rem;
+      font-weight: 500;
+      letter-spacing: -0.015em;
+    }
+    p { margin: 0 0 0.9rem; color: var(--ink-soft); font-size: 0.9rem; line-height: 1.6; }
+    p:last-child { margin-bottom: 0; font-size: 0.82rem; }
   </style>
 </head>
 <body>
   <main class="card">
-    <h1>Invalid channel id</h1>
+    <p class="eyebrow">fleeting.chat</p>
+    <h1>That room id doesn't look right.</h1>
     <p>${msg}</p>
-    <p><a href="/">Back to fleeting.chat</a></p>
+    <p><a href="/">Make a new room</a></p>
   </main>
 </body>
 </html>`;
