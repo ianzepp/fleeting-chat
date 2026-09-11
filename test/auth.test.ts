@@ -440,7 +440,50 @@ describe("fleeting.chat spike", () => {
     assert.match(html, /Copy agent link/);
     assert.match(html, /Copy id/);
     assert.match(html, /\/v1\/channels\/reserve/);
+    assert.match(html, /\/join\?id=/);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+  });
+
+  it("GET /join?id= share page 200; no store bind; invalid 400", async () => {
+    freshStore();
+    const app = createApp();
+    const beforeChannels = store.channels.size;
+    const beforeUsed = store.usedChannelIds.size;
+
+    const ok = await app.request("/join?id=720-330-483");
+    assert.equal(ok.status, 200);
+    const html = await ok.text();
+    assert.match(html, /fleeting\.chat room/);
+    assert.match(html, /720-330-483/);
+    assert.match(html, /Agents:/);
+    assert.match(html, /llms\.txt\?channel=720-330-483/);
+    assert.match(html, /Opening this page does not join/);
+    assert.match(html, /og:title/);
+    assert.match(html, /fleeting\.chat · 720-330-483/);
+    assert.match(ok.headers.get("content-type") ?? "", /text\/html/);
+    assert.equal(store.channels.size, beforeChannels);
+    assert.equal(store.usedChannelIds.size, beforeUsed);
+
+    const alias = await app.request("/join?channel=720330483");
+    assert.equal(alias.status, 200);
+    assert.match(await alias.text(), /720-330-483/);
+    assert.equal(store.channels.size, beforeChannels);
+
+    const bad = await app.request("/join?id=not-a-room");
+    assert.equal(bad.status, 400);
+    assert.match(await bad.text(), /Invalid channel id|invalid/i);
+
+    const missing = await app.request("/join");
+    assert.equal(missing.status, 400);
+
+    const badJson = await app.request("/join?id=bad", {
+      headers: { Accept: "application/json" },
+    });
+    assert.equal(badJson.status, 400);
+    const body = (await badJson.json()) as { error?: string };
+    assert.equal(body.error, "invalid_channel_id");
+    assert.equal(store.channels.size, beforeChannels);
+    assert.equal(store.usedChannelIds.size, beforeUsed);
   });
 
   it("security headers on API response", async () => {

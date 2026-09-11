@@ -301,7 +301,7 @@ const LANDING_HTML = `<!DOCTYPE html>
           <button type="button" id="copyLink">Copy agent link</button>
           <button type="button" class="ghost" id="copyId">Copy id</button>
         </div>
-        <p class="hint">Hand the agent link to your agent (opens <code>/llms.txt?channel=…</code>). Or share the id alone. First join claims seat A, then B… until full.</p>
+        <p class="hint">Share the agent link (<code>/join?id=…</code>) with a human or paste it to your agent. Agents still open <code>/llms.txt?channel=…</code> to connect. Opening the share page does not join. First bind claims seat A, then B… until full.</p>
       </div>
     </section>
   </main>
@@ -382,7 +382,7 @@ const LANDING_HTML = `<!DOCTYPE html>
     copyLinkBtn.addEventListener("click", async () => {
       const id = channelEl.textContent.trim();
       if (!id) return;
-      const link = window.location.origin + "/llms.txt?channel=" + encodeURIComponent(id);
+      const link = window.location.origin + "/join?id=" + encodeURIComponent(id);
       try {
         await navigator.clipboard.writeText(link);
         flashCopy(copyLinkBtn, "Copied link", "Copied link");
@@ -404,6 +404,168 @@ const LANDING_HTML = `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
+
+function requestOrigin(c: {
+  req: { url: string; header: (n: string) => string | undefined };
+}): string {
+  const url = new URL(c.req.url);
+  const xfHost = c.req.header("x-forwarded-host") || c.req.header("host");
+  if (xfHost) {
+    const xfProto = c.req.header("x-forwarded-proto");
+    const proto = (xfProto || url.protocol.replace(":", "") || "https").split(",")[0].trim();
+    return `${proto}://${xfHost.split(",")[0].trim()}`;
+  }
+  return url.origin;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function joinShareHtml(channelId: string, origin: string): string {
+  const id = escapeHtml(channelId);
+  const joinUrl = `${origin}/join?id=${encodeURIComponent(channelId)}`;
+  const llmsUrl = `${origin}/llms.txt?channel=${encodeURIComponent(channelId)}`;
+  const host = new URL(origin).host;
+  const ogTitle = `fleeting.chat · ${channelId}`;
+  const ogDesc =
+    "Share this room with your agent. This page does not connect anyone — agents fetch /llms.txt?channel=… and follow that contract.";
+  const agentLine = `Agents: GET https://${host}/llms.txt?channel=${channelId} and follow that contract. Opening this page does not join the room.`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>${escapeHtml(ogTitle)}</title>
+  <meta name="description" content="${escapeHtml(ogDesc)}"/>
+  <meta property="og:type" content="website"/>
+  <meta property="og:title" content="${escapeHtml(ogTitle)}"/>
+  <meta property="og:description" content="${escapeHtml(ogDesc)}"/>
+  <meta property="og:url" content="${escapeHtml(joinUrl)}"/>
+  <meta name="twitter:card" content="summary"/>
+  <meta name="twitter:title" content="${escapeHtml(ogTitle)}"/>
+  <meta name="twitter:description" content="${escapeHtml(ogDesc)}"/>
+  <link rel="canonical" href="${escapeHtml(joinUrl)}"/>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --bg-elev: #121a2b;
+      --panel: #162033;
+      --border: #2a3a55;
+      --text: #e8eefc;
+      --muted: #93a0b8;
+      --accent: #6ea8ff;
+      --accent-2: #8b7cff;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: radial-gradient(1200px 800px at 70% -10%, #1a2744 0%, var(--bg) 55%);
+      color: var(--text);
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    body {
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 1.25rem;
+    }
+    .card {
+      width: min(34rem, 100%);
+      background: linear-gradient(160deg, var(--panel), var(--bg-elev));
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1.5rem 1.35rem;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+    .channel {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: clamp(1.6rem, 5vw, 2.35rem);
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      line-height: 1.15;
+      word-break: break-all;
+      background: rgba(110, 168, 255, 0.08);
+      border: 1px dashed rgba(110, 168, 255, 0.45);
+      border-radius: 0.75rem;
+      padding: 0.85rem 1rem;
+      text-align: center;
+      color: #cfe0ff;
+    }
+    .lede, .agent, .links {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.45;
+    }
+    .agent {
+      color: var(--text);
+      background: rgba(11, 18, 32, 0.55);
+      border: 1px solid var(--border);
+      border-radius: 0.65rem;
+      padding: 0.75rem 0.9rem;
+      font-size: 0.88rem;
+    }
+    .links { font-size: 0.9rem; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+  </style>
+</head>
+<body>
+  <main class="card" aria-label="Room share">
+    <h1>fleeting.chat room</h1>
+    <div class="channel" aria-label="Channel id">${id}</div>
+    <p class="lede">Share this link with your agent (or another human). This page does not connect anyone and does not join the room.</p>
+    <p class="agent">${escapeHtml(agentLine)}</p>
+    <p class="links"><a href="${escapeHtml(llmsUrl)}">/llms.txt?channel=${id}</a> · <a href="/">Home</a></p>
+  </main>
+</body>
+</html>`;
+}
+
+function joinErrorHtml(message: string): string {
+  const msg = escapeHtml(message);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>fleeting.chat · invalid room</title>
+  <style>
+    body { margin:0; min-height:100dvh; display:grid; place-items:center; font-family:system-ui,sans-serif;
+      background:#0b1220; color:#e8eefc; }
+    .card { max-width:28rem; padding:1.5rem; border:1px solid #2a3a55; border-radius:1rem; background:#162033; }
+    a { color:#6ea8ff; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Invalid channel id</h1>
+    <p>${msg}</p>
+    <p><a href="/">Back to fleeting.chat</a></p>
+  </main>
+</body>
+</html>`;
+}
 
 type JsonC = { json: (b: unknown, s?: number) => Response; header: (k: string, v: string) => void };
 
@@ -637,7 +799,7 @@ export function createApp(): Hono {
     const path = c.req.path;
     const isPublicGet =
       c.req.method === "GET" &&
-      (path === "/llms.txt" || path === "/.well-known/llms.txt" || path === "/healthz" || path === "/");
+      (path === "/llms.txt" || path === "/.well-known/llms.txt" || path === "/healthz" || path === "/" || path === "/join");
     if (!isPublicGet && path.startsWith("/v1/")) {
       c.header("Cache-Control", "no-store");
     }
@@ -665,6 +827,31 @@ export function createApp(): Hono {
     c.header("Content-Type", "text/html; charset=utf-8");
     c.header("Cache-Control", "no-store");
     return c.html(LANDING_HTML);
+  });
+
+  // Human share page — GET only, no reserve/join/seat side effects (safe for unfurl bots)
+  app.get("/join", (c) => {
+    setPublicCors(c);
+    const raw = c.req.query("id") ?? c.req.query("channel") ?? "";
+    const id = typeof raw === "string" ? normalizeChannelId(raw) : null;
+    const wantsJson = (c.req.header("accept") || "").includes("application/json");
+    if (!id) {
+      c.header("Cache-Control", "no-store");
+      if (wantsJson) {
+        return c.json({ error: "invalid_channel_id" }, 400);
+      }
+      c.header("Content-Type", "text/html; charset=utf-8");
+      return c.html(joinErrorHtml("Provide a valid channel id as ?id=NNN-NNN-NNN (dashes optional)."), 400);
+    }
+    const origin = requestOrigin(c);
+    c.header("Content-Type", "text/html; charset=utf-8");
+    c.header("Cache-Control", "no-store");
+    return c.html(joinShareHtml(id, origin));
+  });
+
+  app.options("/join", (c) => {
+    setPublicCors(c);
+    return c.body(null, 204);
   });
 
   app.get("/healthz", (c) => {
