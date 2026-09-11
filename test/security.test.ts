@@ -15,6 +15,7 @@ import {
   freshStore,
   html,
   json,
+  mintSeatTokenViaSignature,
   postJson,
   type App,
 } from "./support.js";
@@ -23,6 +24,20 @@ import {
 function agentInstruction(body: string): string {
   return (body.match(/Agents: GET ([^<]+)/) ?? [])[1] ?? "";
 }
+
+let prevEncKey: string | undefined;
+
+before(() => {
+  prevEncKey = process.env.STORE_ENCRYPTION_KEY;
+  // Channels default to encrypted:true, which needs a master key.
+  process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+});
+
+after(() => {
+  if (prevEncKey === undefined) delete process.env.STORE_ENCRYPTION_KEY;
+  else process.env.STORE_ENCRYPTION_KEY = prevEncKey;
+});
+
 
 describe("share-page origin (BH-HEADERS-001)", () => {
   let prevPublicOrigin: string | undefined;
@@ -97,19 +112,6 @@ describe("share-page origin (BH-HEADERS-001)", () => {
 });
 
 describe("file metadata bounds (BH-INPUT-001)", () => {
-  let prevEncKey: string | undefined;
-
-  before(() => {
-    prevEncKey = process.env.STORE_ENCRYPTION_KEY;
-    // Channels default to encrypted:true, which needs a master key.
-    process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
-  });
-
-  after(() => {
-    if (prevEncKey === undefined) delete process.env.STORE_ENCRYPTION_KEY;
-    else process.env.STORE_ENCRYPTION_KEY = prevEncKey;
-  });
-
   beforeEach(() => freshStore());
 
   async function newChannel(app: App) {
@@ -175,5 +177,47 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
     const res = await upload(app, channel, { filename: "résumé.pdf", content_base64: PIXEL });
     assert.equal(res.status, 201, JSON.stringify(res.body));
     assert.equal(res.body.filename, "résumé.pdf");
+  });
+});
+
+describe("seat token rotation (BH-AUTH-003)", () => {
+  beforeEach(() => freshStore());
+
+  async function createSeatOne(app: App, pair: ReturnType<typeof ed25519PemPair>) {
+    const created = await json(app, "/v1/channels", postJson({ public_key_pem: pair.publicPem }));
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    return { id: created.body.channel_id as string, token: created.body.token as string };
+  }
+
+  it("invalidates the previous token when a seat re-joins", async () => {
+    const app = createApp();
+    const pair = ed25519PemPair();
+    const { id, token: first } = await createSeatOne(app, pair);
+
+    const rejoin = await json(app, `/v1/channels/${id}/join`, postJson({ public_key_pem: pair.publicPem }));
+    assert.equal(rejoin.status, 200);
+    const second = rejoin.body.token as string;
+    assert.notEqual(second, first);
+
+    const stale = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(first) });
+    assert.equal(stale.status, 401, "re-joined seat left its previous token alive");
+    const fresh = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(second) });
+    assert.equal(fresh.status, 200);
+  });
+
+  it("invalidates the previous token when a seat refreshes via challenge/sign", async () => {
+    const app = createApp();
+    const pair = ed25519PemPair();
+    const { id, token: first } = await createSeatOne(app, pair);
+
+    const refreshed = await mintSeatTokenViaSignature(app, id, pair);
+    assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+    const second = refreshed.body.token as string;
+    assert.notEqual(second, first);
+
+    const stale = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(first) });
+    assert.equal(stale.status, 401, "refresh left the previous token alive");
+    const fresh = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(second) });
+    assert.equal(fresh.status, 200);
   });
 });

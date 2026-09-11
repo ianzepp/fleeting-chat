@@ -43,6 +43,7 @@ import {
   createChallenge,
   consumeChallenge,
   resolveBearer,
+  revokeSeatTokens,
   mintAgentToken,
   createAgentChallenge,
   consumeAgentChallenge,
@@ -1593,6 +1594,7 @@ export function createApp(): Hono {
           delete seatState.nick;
         }
       }
+      revokeSeatTokens(id, existing);
       const tok = mintToken(id, existing);
       store.touchIdle(ch);
       setApiSecurityHeaders(c);
@@ -1684,6 +1686,7 @@ export function createApp(): Hono {
     if (!verifyEd25519Signature(body.public_key_pem, body.challenge, body.signature_base64)) {
       return jsonError(c, 401, "invalid_signature");
     }
+    revokeSeatTokens(channelId, seat);
     const tok = mintToken(channelId, seat);
     store.touchIdle(ch);
     setApiSecurityHeaders(c);

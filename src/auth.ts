@@ -58,6 +58,22 @@ export function mintToken(channelId: string, seat: Seat, now = Date.now()): Toke
   return rec;
 }
 
+/**
+ * Drop every live token for a seat. Re-join and refresh mint a replacement, so
+ * superseding them keeps a seat bound to one live bearer: a leaked token, or one
+ * minted by an unauthorised re-join, dies as soon as the rightful holder re-binds.
+ */
+export function revokeSeatTokens(channelId: string, seat: Seat): void {
+  let revoked = false;
+  for (const [token, rec] of store.tokens) {
+    if (rec.channelId === channelId && rec.seat === seat) {
+      store.tokens.delete(token);
+      revoked = true;
+    }
+  }
+  if (revoked) store.markDirty();
+}
+
 export function createChallenge(
   channelId: string,
   publicKeyPem: string,
