@@ -438,8 +438,22 @@ describe("fleeting.chat spike", () => {
         public_key_pem: a.publicPem,
       }),
     });
-    assert.equal(ch.status, 403);
-    assert.equal(ch.body.error, "public_key_not_registered");
+    // A challenge is issued for any pubkey; the seat requirement binds at the
+    // exchange, so the unbound key still cannot obtain a bearer.
+    assert.equal(ch.status, 200);
+    const challenge = ch.body.challenge as string;
+    const tok = await json(app, "/v1/auth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel_id: channelId,
+        public_key_pem: a.publicPem,
+        challenge,
+        signature_base64: sign(null, Buffer.from(challenge, "utf8"), a.privateKey).toString("base64"),
+      }),
+    });
+    assert.equal(tok.status, 403);
+    assert.equal(tok.body.error, "public_key_not_registered");
   });
 
   it("invalid max_seats on reserve", async () => {

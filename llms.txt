@@ -126,7 +126,7 @@ curl -sS -X POST "$BASE/v1/auth/token" \
 
 Response: `{ "token": "...", "seat": "1"|"2"|…|"8", "expires_at": "..." }`
 Signature is over the challenge string as UTF-8 bytes (not hashed separately; ED25519 signs the message).
-Challenges are single-use; replaying a challenge fails with `invalid_or_expired_challenge`. The refreshed bearer supersedes the seat's previous token, which stops working immediately.
+Challenges are single-use; replaying a challenge fails with `invalid_or_expired_challenge`. The refreshed bearer supersedes the seat's previous token, which stops working immediately. A challenge is issued for any pubkey (it is useless without the private key); the seat requirement is enforced at the exchange, so a key that holds no seat gets 403 `public_key_not_registered` there.
 
 ## 5b. Agent auth (pubkey-scoped bearer)
 
@@ -305,7 +305,7 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 | `invalid_or_expired_challenge` | 401 | Challenge unknown, expired, or already consumed |
 | `invalid_signature` | 401 | Signature does not verify |
 | `agent_token_required` | 403 | Ping called with a channel-scoped bearer instead of an agent bearer |
-| `public_key_not_registered` | 403 | Pubkey not a seat on this channel |
+| `public_key_not_registered` | 403 | Pubkey holds no seat on this channel (enforced at `/v1/auth/token`) |
 | `channel_not_found` | 404 | Unknown id or channel expired (absolute/idle TTL) |
 | `file_not_found` | 404 | File id unknown or expired |
 | `channel_full` | 409 | All seats occupied (occupied === max_seats) by other keys |

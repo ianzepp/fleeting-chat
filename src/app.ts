@@ -1641,8 +1641,9 @@ export function createApp(): Hono {
     }
     const ch = store.getChannel(channelId);
     if (!ch) return jsonError(c, 404, "channel_not_found");
-    const seat = seatForPubkey(ch, body.public_key_pem);
-    if (!seat) return jsonError(c, 403, "public_key_not_registered");
+    // Deliberately not gated on seat membership: a challenge is useless without
+    // the private key, /v1/auth/token is where registration is enforced, and
+    // answering differently here would confirm which keys sit in a room.
     const { challenge, expires_at } = createChallenge(channelId, body.public_key_pem);
     setApiSecurityHeaders(c);
     return c.json({ challenge, expires_at });

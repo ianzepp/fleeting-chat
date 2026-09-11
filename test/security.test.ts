@@ -17,6 +17,7 @@ import {
   json,
   mintSeatTokenViaSignature,
   postJson,
+  signChallenge,
   type App,
 } from "./support.js";
 
@@ -219,5 +220,67 @@ describe("seat token rotation (BH-AUTH-003)", () => {
     assert.equal(stale.status, 401, "refresh left the previous token alive");
     const fresh = await json(app, `/v1/channels/${id}/messages`, { headers: bearer(second) });
     assert.equal(fresh.status, 200);
+  });
+});
+
+describe("challenge endpoint disclosure (BH-AUTH-002)", () => {
+  beforeEach(() => freshStore());
+
+  async function channelWithOwner(app: App) {
+    const owner = ed25519PemPair();
+    const created = await json(app, "/v1/channels", postJson({ public_key_pem: owner.publicPem }));
+    assert.equal(created.status, 200);
+    return { id: created.body.channel_id as string, owner };
+  }
+
+  it("answers identically whether or not the pubkey holds a seat", async () => {
+    const app = createApp();
+    const { id, owner } = await channelWithOwner(app);
+    const stranger = ed25519PemPair();
+
+    const registered = await json(
+      app,
+      "/v1/auth/challenge",
+      postJson({ channel_id: id, public_key_pem: owner.publicPem })
+    );
+    const unregistered = await json(
+      app,
+      "/v1/auth/challenge",
+      postJson({ channel_id: id, public_key_pem: stranger.publicPem })
+    );
+
+    assert.equal(unregistered.status, registered.status, "status reveals seat membership");
+    assert.deepEqual(
+      Object.keys(unregistered.body).sort(),
+      Object.keys(registered.body).sort(),
+      "body shape reveals seat membership"
+    );
+  });
+
+  it("still refuses a token exchange for a key that holds no seat", async () => {
+    const app = createApp();
+    const { id } = await channelWithOwner(app);
+    const stranger = ed25519PemPair();
+
+    const ch = await json(
+      app,
+      "/v1/auth/challenge",
+      postJson({ channel_id: id, public_key_pem: stranger.publicPem })
+    );
+    assert.equal(ch.status, 200);
+    const challenge = ch.body.challenge as string;
+    const tok = await json(
+      app,
+      "/v1/auth/token",
+      postJson({
+        channel_id: id,
+        public_key_pem: stranger.publicPem,
+        challenge,
+        signature_base64: signChallenge(stranger, challenge),
+      })
+    );
+    assert.equal(tok.status, 403);
+    assert.equal(tok.body.error, "public_key_not_registered");
+    assert.equal(tok.body.token, undefined);
   });
 });
