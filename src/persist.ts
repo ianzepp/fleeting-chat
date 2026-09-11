@@ -19,6 +19,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -47,6 +48,8 @@ import type {
 const SAVE_DEBOUNCE_MS = 300;
 const SQLITE_NAME = "fleeting.sqlite";
 const JSON_NAME = "store.json";
+/** Name older releases used for the post-migration plaintext copy. Still removed
+ *  on boot so those files do not outlive the release that wrote them. */
 const JSON_MIGRATED_NAME = "store.json.migrated";
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -696,10 +699,22 @@ export function installShutdownFlush(store: Store): void {
   process.on("SIGINT", () => onSignal("SIGINT"));
 }
 
+/** Delete migrated legacy JSON. It holds plaintext message bodies and live bearer
+ *  tokens, so once SQLite is authoritative the copy is removed instead of kept. */
+function removeLegacyStoreFiles(paths: string[]): void {
+  for (const path of paths) {
+    try {
+      rmSync(path, { force: true });
+    } catch (err) {
+      console.error(`fleeting.chat: could not remove legacy store file ${path}:`, err);
+    }
+  }
+}
+
 /**
  * Load `{dataDir}/fleeting.sqlite` into `store` before serving.
- * If only legacy `store.json` exists, import → write SQLite → rename to
- * `store.json.migrated`. Skips expired rows.
+ * If only legacy `store.json` exists, import → write SQLite → delete the JSON.
+ * Skips expired rows.
  */
 export async function loadStore(store: Store): Promise<void> {
   const dataDir = resolveDataDir();
@@ -712,19 +727,13 @@ export async function loadStore(store: Store): Promise<void> {
   try {
     if (existsSync(sqlite)) {
       loadFromSqlite(store, dataDir);
-      // Leftover JSON after a prior partial migrate: do not re-import over SQLite.
-      if (existsSync(jsonPath)) {
-        try {
-          renameSync(jsonPath, migratedPath);
-          console.error(
-            "fleeting.chat: renamed leftover store.json → store.json.migrated (SQLite already present)"
-          );
-        } catch (err) {
-          console.error(
-            "fleeting.chat: could not rename leftover store.json:",
-            err
-          );
-        }
+      // Leftover JSON after a prior partial migrate: never re-import over SQLite,
+      // and do not leave its plaintext bodies or tokens on the volume.
+      if (existsSync(jsonPath) || existsSync(migratedPath)) {
+        removeLegacyStoreFiles([jsonPath, migratedPath]);
+        console.error(
+          "fleeting.chat: removed legacy plaintext store files (SQLite is authoritative)"
+        );
       }
       return;
     }
@@ -732,9 +741,9 @@ export async function loadStore(store: Store): Promise<void> {
     if (existsSync(jsonPath)) {
       loadFromJsonFile(store, jsonPath);
       writeStoreSync(store, dataDir);
-      renameSync(jsonPath, migratedPath);
+      removeLegacyStoreFiles([jsonPath, migratedPath]);
       console.error(
-        "fleeting.chat: migrated store.json → fleeting.sqlite (renamed to store.json.migrated)"
+        "fleeting.chat: migrated store.json → fleeting.sqlite (legacy JSON removed)"
       );
       return;
     }

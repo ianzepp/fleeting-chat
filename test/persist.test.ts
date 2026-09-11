@@ -383,8 +383,69 @@ describe("SQLite persistence", () => {
     assert.equal(ch!.files.get("f1")!.seat, "1");
     assert.equal(store.tokens.get("tok-legacy")!.seat, "1");
     assert.ok(existsSync(join(dataDir, "fleeting.sqlite")));
+    assert.equal(existsSync(jsonPath), false, "legacy plaintext JSON must not survive migration");
+    assert.equal(
+      existsSync(join(dataDir, "store.json.migrated")),
+      false,
+      "no plaintext copy may be retained"
+    );
+  });
+
+  it("removes a legacy plaintext copy left by an older release", async () => {
+    const now = Date.now();
+    const disk = {
+      version: 1,
+      channels: [
+        {
+          id: "999-888-777",
+          createdAt: now,
+          absoluteExpiresAt: now + 3600_000,
+          idleExpiresAt: now + 3600_000,
+          idleTtlMs: 3600_000,
+          maxSeats: 2,
+          seats: {},
+          messages: [
+            { id: "m1", from: "1", ts: new Date(now).toISOString(), body: "LEGACY-CANARY" },
+          ],
+          nextMsgSeq: 2,
+          files: {},
+        },
+      ],
+      tokens: [],
+      challenges: [],
+      agentTokens: [],
+      agentChallenges: [],
+      usedChannelIds: ["999-888-777"],
+    };
+    const jsonPath = join(dataDir, "store.json");
+    const staleMigrated = join(dataDir, "store.json.migrated");
+    writeFileSync(jsonPath, JSON.stringify(disk), "utf8");
+    writeFileSync(staleMigrated, JSON.stringify(disk), "utf8");
+    freshStore();
+
+    await loadStore(store);
+
     assert.equal(existsSync(jsonPath), false);
-    assert.ok(existsSync(join(dataDir, "store.json.migrated")));
+    assert.equal(existsSync(staleMigrated), false, "older plaintext copy was left on the volume");
+
+    // The imported channel survives; only the plaintext source is gone.
+    freshStore();
+    await loadStore(store);
+    assert.equal(store.channels.get("999-888-777")!.messages[0].body, "LEGACY-CANARY");
+  });
+
+  it("drops a store.json that reappears beside an existing SQLite file", async () => {
+    freshStore();
+    await loadStore(store);
+    flushSync(store);
+
+    const jsonPath = join(dataDir, "store.json");
+    writeFileSync(jsonPath, '{"version":1,"channels":[],"tokens":[]}', "utf8");
+    freshStore();
+
+    await loadStore(store);
+
+    assert.equal(existsSync(jsonPath), false, "superseded store.json was kept on the volume");
   });
 
   it("crypto helpers roundtrip with STORE_ENCRYPTION_KEY", async () => {

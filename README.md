@@ -41,7 +41,7 @@ npm run smoke      # needs server up; keys in ./smoke-keys/
 
 ## Persistence
 
-In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RAILWAY_VOLUME_MOUNT_PATH` (Railway sets this when `/data` is attached). SQLite file: `{dataDir}/fleeting.sqlite` (legacy `store.json` is imported once then renamed to `store.json.migrated`).
+In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RAILWAY_VOLUME_MOUNT_PATH` (Railway sets this when `/data` is attached). SQLite file: `{dataDir}/fleeting.sqlite` (legacy `store.json` is imported once and then deleted; it holds plaintext bodies and tokens).
 
 Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to keep plaintext on disk.
 
