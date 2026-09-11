@@ -28,6 +28,17 @@ function agentInstruction(body: string): string {
 
 let prevEncKey: string | undefined;
 
+async function newChannel(app: App) {
+  const pair = ed25519PemPair();
+  const created = await json(app, "/v1/channels", postJson({ public_key_pem: pair.publicPem }));
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  return { id: created.body.channel_id as string, token: created.body.token as string };
+}
+
+async function upload(app: App, channel: { id: string; token: string }, body: unknown) {
+  return json(app, `/v1/channels/${channel.id}/files`, postJson(body, bearer(channel.token)));
+}
+
 before(() => {
   prevEncKey = process.env.STORE_ENCRYPTION_KEY;
   // Channels default to encrypted:true, which needs a master key.
@@ -114,17 +125,6 @@ describe("share-page origin (BH-HEADERS-001)", () => {
 
 describe("file metadata bounds (BH-INPUT-001)", () => {
   beforeEach(() => freshStore());
-
-  async function newChannel(app: App) {
-    const pair = ed25519PemPair();
-    const created = await json(app, "/v1/channels", postJson({ public_key_pem: pair.publicPem }));
-    assert.equal(created.status, 200, JSON.stringify(created.body));
-    return { id: created.body.channel_id as string, token: created.body.token as string };
-  }
-
-  async function upload(app: App, channel: { id: string; token: string }, body: unknown) {
-    return json(app, `/v1/channels/${channel.id}/files`, postJson(body, bearer(channel.token)));
-  }
 
   const PIXEL = "aGk="; // "hi"
 
@@ -282,5 +282,29 @@ describe("challenge endpoint disclosure (BH-AUTH-002)", () => {
     assert.equal(tok.status, 403);
     assert.equal(tok.body.error, "public_key_not_registered");
     assert.equal(tok.body.token, undefined);
+  });
+});
+
+describe("file upload throttling (BH-DOS-006)", () => {
+  beforeEach(() => freshStore());
+
+  it("throttles a per-client upload flood", async () => {
+    const app = createApp();
+    const channel = await newChannel(app);
+    const codes: Record<number, number> = {};
+    for (let i = 0; i < 40; i++) {
+      const res = await upload(app, channel, { filename: `f${i}.txt`, content_base64: "aGk=" });
+      codes[res.status] = (codes[res.status] ?? 0) + 1;
+    }
+    assert.ok(codes[429] >= 1, `upload flood was not throttled: ${JSON.stringify(codes)}`);
+  });
+
+  it("still allows a normal ten-file upload", async () => {
+    const app = createApp();
+    const channel = await newChannel(app);
+    for (let i = 0; i < 10; i++) {
+      const res = await upload(app, channel, { filename: `f${i}.txt`, content_base64: "aGk=" });
+      assert.equal(res.status, 201, `upload ${i}: ${JSON.stringify(res.body)}`);
+    }
   });
 });

@@ -165,7 +165,7 @@ export class Store {
   agentTokens = new Map<string, AgentTokenRecord>();
   agentChallenges = new Map<string, AgentChallengeRecord>();
   usedChannelIds = new Set<string>();
-  /** create + join + auth endpoints per IP */
+  /** create + join + auth + file upload requests per IP */
   ipRate = new Map<string, IpRateWindow>();
 
   /** Schedule a debounced persist when a data dir is configured. */

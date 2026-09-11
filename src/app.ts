@@ -1935,6 +1935,8 @@ export function createApp(): Hono {
     store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
+    const ip = clientIp(c);
+    if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
     const idRaw = c.req.param("id");
     const id = normalizeChannelId(idRaw);
