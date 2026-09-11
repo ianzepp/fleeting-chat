@@ -15,12 +15,15 @@
  */
 
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -361,11 +364,39 @@ function writeStoreSync(store: Store, dataDir: string): void {
       `${SQLITE_NAME}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
     );
     const exported = Buffer.from(db.export());
-    // Owner-only: the file holds channel metadata, message ciphertext, and token digests.
-    writeFileSync(tmp, exported, { mode: 0o600 });
+    writeDurably(tmp, exported, dataDir);
     renameSync(tmp, file);
+    // The rename must survive a crash before callers treat the write as done —
+    // notably the migration path, which deletes the plaintext JSON afterwards.
+    syncDirectory(dataDir);
   } finally {
     db.close();
+  }
+}
+
+/** Write contents and flush them to disk before the caller replaces the real file. */
+function writeDurably(target: string, contents: Buffer, dataDir: string): void {
+  const fd = openSync(target, "w", 0o600);
+  try {
+    writeSync(fd, contents);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Fsync a directory so a rename into it is durable. Opening a directory is not
+ *  portable, so a failure is reported rather than fatal. */
+function syncDirectory(dir: string): void {
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (err) {
+    console.error("fleeting.chat: could not fsync the data directory:", err);
   }
 }
 
