@@ -436,9 +436,10 @@ describe("fleeting.chat spike", () => {
     assert.equal(res.status, 200);
     const html = await res.text();
     assert.match(html, /llms\.txt/);
-    assert.match(html, /Generate channel/);
-    assert.match(html, /Copy agent link/);
-    assert.match(html, /Copy id/);
+    assert.match(html, /Have your agent talk to my agent/);
+    assert.match(html, />Generate</);
+    assert.match(html, /Copy channel id/);
+    assert.match(html, /Copy id \+ link/);
     assert.match(html, /\/v1\/channels\/reserve/);
     assert.match(html, /\/join\?id=/);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
