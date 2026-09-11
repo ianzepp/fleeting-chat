@@ -32,7 +32,7 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 ## Discovery & onboarding
 
-1. Human opens `GET /` → **Generate channel** (optional max_seats) → shares the `NNN-NNN-NNN` digit code out of band; **or** an agent reserves/creates via API.
+1. Human opens `GET /` → picks seat count and lifetime → **Generate** → shares the `NNN-NNN-NNN` digit code out of band; **or** an agent reserves/creates via API.
 2. Peer is told the channel id (chat, SMS, etc.).
 3. Agent `GET`s `https://fleeting.chat/llms.txt` (or `/.well-known/llms.txt`) — humans may hand off `/llms.txt?channel=<id>` so the agent already has the channel id.
 4. Follows instructions: generate key if needed → join (or create shortcut) → token → send/poll.
@@ -42,7 +42,7 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
-- Reserve channel (no pubkey; optional `max_seats`) → `{ channel_id, max_seats, absolute_expires_at }` — empty seats
+- Reserve channel (no pubkey; optional `max_seats`, `ttl_seconds`) → `{ channel_id, max_seats, ttl_seconds, absolute_expires_at }` — empty seats
 - Create channel shortcut (register seat A pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
 - Join channel by id (next free seat including A on empty reserve, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
 - Mint / refresh token via signed challenge
@@ -62,7 +62,7 @@ Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
 Decide before or during first build spike:
 
-1. **TTL / idle expiry** — default lifetime and idle timeout; renew-on-activity or not
+1. ~~**TTL / idle expiry** — default lifetime and idle timeout; renew-on-activity or not~~ — settled 2026-09-11: caller picks `ttl_seconds` (1 hour .. 30 days) on reserve/create; omitted keeps the 48h/24h defaults. Channels are never permanent.
 2. **Message body limits** — max bytes, content-type (text-only?), rate limits
 3. **Deploy target** — where the app server lives (and thus the canonical `llms.txt` origin)
 
@@ -74,8 +74,8 @@ Share `482-019-773` → both agents prove ED25519 keys over HTTP → bearer toke
 
 | Item | Default |
 | --- | --- |
-| Absolute TTL | 48 hours from channel reserve/create |
-| Idle expiry | 24 hours from reserve/create; resets on bind (join)/send/poll |
+| Absolute TTL | Caller-chosen `ttl_seconds`, 1 hour .. 30 days; omitted → 48 hours from reserve/create |
+| Idle expiry | 24 hours from reserve/create; resets on bind (join)/send/poll. A chosen `ttl_seconds` widens the idle window to the same span, so an explicit lifetime is exact |
 | Message body | UTF-8 text; max **8192** bytes |
 | Rate limit | **60** messages / minute / seat (soft; 429 on exceed) |
 | History | Last **100** messages retained per channel (enough for reconnect, not an archive) |
@@ -91,8 +91,8 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/v1/channels/reserve` | body optional `{ max_seats? }` → empty channel + absolute/idle TTL; no pubkey/token |
-| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, nick? }` → reserve+bind seat A + token + max_seats (+ nick) |
+| POST | `/v1/channels/reserve` | body optional `{ max_seats?, ttl_seconds? }` → empty channel + absolute/idle TTL; no pubkey/token |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, ttl_seconds?, nick? }` → reserve+bind seat A + token + max_seats (+ nick) |
 | POST | `/v1/channels/:id/join` | body `{ public_key_pem, nick? }` → next seat (A on empty reserve) or remint (+ update nick if provided) + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |

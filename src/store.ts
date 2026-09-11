@@ -59,6 +59,9 @@ export interface Channel {
   createdAt: number;
   absoluteExpiresAt: number;
   idleExpiresAt: number;
+  /** Window touchIdle() re-arms. Equals the chosen lifetime when ttl_seconds was
+   *  given, so an explicit choice is the exact lifetime; else the 24h default. */
+  idleTtlMs: number;
   maxSeats: number;
   seats: Partial<Record<Seat, SeatState>>;
   messages: Message[];
@@ -110,6 +113,9 @@ export interface IpRateWindow {
 
 export const ABSOLUTE_TTL_MS = 48 * 60 * 60 * 1000;
 export const IDLE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Caller-chosen channel lifetime bounds: 1 hour .. 30 days. */
+export const MIN_TTL_SECONDS = 3600;
+export const MAX_TTL_SECONDS = 2_592_000;
 export const TOKEN_TTL_MS = 60 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const NICK_MAX_BYTES = 64;
@@ -170,7 +176,7 @@ export class Store {
   }
 
   touchIdle(ch: Channel, now = Date.now()): void {
-    ch.idleExpiresAt = now + IDLE_TTL_MS;
+    ch.idleExpiresAt = Math.min(ch.absoluteExpiresAt, now + ch.idleTtlMs);
   }
 
   deleteChannel(id: string): void {

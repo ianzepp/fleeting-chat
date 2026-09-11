@@ -221,6 +221,86 @@ describe("fleeting.chat spike", () => {
     }
   });
 
+  it("ttl_seconds sets the channel lifetime on reserve and create", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+
+    const before = Date.now();
+    const res = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ttl_seconds: 3600 }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ttl_seconds, 3600);
+    const expires = Date.parse(res.body.absolute_expires_at);
+    assert.ok(expires >= before + 3600_000 - 5000 && expires <= Date.now() + 3600_000);
+    // An explicit ttl widens the idle window so the room reaches the chosen expiry.
+    assert.equal(res.body.idle_expires_at, res.body.absolute_expires_at);
+
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: 2_592_000 }),
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.ttl_seconds, 2_592_000);
+  });
+
+  it("omitted ttl_seconds keeps the 48h absolute / 24h idle defaults", async () => {
+    freshStore();
+    const app = createApp();
+    const res = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ttl_seconds, 48 * 3600);
+    const gap =
+      Date.parse(res.body.absolute_expires_at) - Date.parse(res.body.idle_expires_at);
+    assert.ok(Math.abs(gap - 24 * 3600_000) < 5000, `idle gap ${gap}`);
+  });
+
+  it("a long ttl survives activity; touch never shortens below the chosen window", async () => {
+    freshStore();
+    const app = createApp();
+    const res = await json(app, "/v1/channels/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ttl_seconds: 2_592_000 }),
+    });
+    const ch = store.channels.get(res.body.channel_id)!;
+    const absolute = ch.absoluteExpiresAt;
+    store.touchIdle(ch);
+    assert.equal(ch.idleExpiresAt, absolute);
+    assert.equal(store.isExpired(ch), false);
+  });
+
+  it("out-of-range ttl_seconds fails on reserve and create", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    for (const bad of [0, 3599, 2_592_001, 1.5, "3600", true]) {
+      const reserve = await json(app, "/v1/channels/reserve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttl_seconds: bad }),
+      });
+      assert.equal(reserve.status, 400, `ttl=${JSON.stringify(bad)}`);
+      assert.equal(reserve.body.error, "invalid_ttl");
+
+      const create = await json(app, "/v1/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: bad }),
+      });
+      assert.equal(create.status, 400, `ttl=${JSON.stringify(bad)}`);
+      assert.equal(create.body.error, "invalid_ttl");
+    }
+  });
+
   it("challenge / sign refresh", async () => {
     freshStore();
     const app = createApp();
@@ -440,6 +520,8 @@ describe("fleeting.chat spike", () => {
     assert.match(html, />Generate</);
     assert.match(html, /Copy channel id/);
     assert.match(html, /Copy id \+ link/);
+    assert.match(html, /How long should the channel live/);
+    assert.match(html, /ttl_seconds/);
     assert.match(html, /\/v1\/channels\/reserve/);
     assert.match(html, /\/join\?id=/);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);

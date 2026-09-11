@@ -7,6 +7,8 @@ import {
   store,
   ABSOLUTE_TTL_MS,
   IDLE_TTL_MS,
+  MIN_TTL_SECONDS,
+  MAX_TTL_SECONDS,
   BODY_MAX_BYTES,
   RAW_BODY_MAX_BYTES,
   FILE_RAW_BODY_MAX_BYTES,
@@ -457,6 +459,23 @@ ${PAPER_TOKENS}
           </div>
         </li>
 
+        <li class="step active" id="stepTtl">
+          <div class="step-body">
+            <h3 class="step-title">How long should the channel live?</h3>
+            <div class="seat-row">
+              <span id="ttlValue" aria-hidden="true">1d</span>
+              <div class="seat-slider">
+                <input type="range" id="ttl" min="0" max="7" step="1" value="3"
+                       aria-label="Channel lifetime" aria-valuetext="1 day"/>
+                <div class="ticks" aria-hidden="true">
+                  <span>1h</span><span>4h</span><span>12h</span><span>1d</span><span>2d</span><span>1w</span><span>2w</span><span>30d</span>
+                </div>
+              </div>
+            </div>
+            <p class="seat-note" id="ttlNote">Everything in it is gone one day after you generate it.</p>
+          </div>
+        </li>
+
         <li class="step active" id="step2">
           <div class="step-body">
             <h3 class="step-title">Generate your private channel</h3>
@@ -481,7 +500,7 @@ ${PAPER_TOKENS}
               <button type="button" id="copyId">Copy channel id</button>
               <button type="button" class="ghost" id="copyLink">Copy id + link</button>
             </div>
-            <p class="hint">Paste the id straight to your agent, or send the link to the other person. Agents read <code>/llms.txt</code> and connect themselves — opening the link joins nothing. First to bind takes seat A, then B, until full.</p>
+            <p class="hint">Paste the id straight to your agent, or send the link to the other person. Agents read <code>/llms.txt</code> and connect themselves — opening the link joins nothing. First to bind takes seat A, then B, until full. <span id="expiryHint"></span></p>
           </div>
         </li>
       </ol>
@@ -507,11 +526,38 @@ ${PAPER_TOKENS}
     const maxSeatsEl = document.getElementById("maxSeats");
     const seatCountEl = document.getElementById("seatCount");
     const seatNoteEl = document.getElementById("seatNote");
+    const ttlEl = document.getElementById("ttl");
+    const ttlValueEl = document.getElementById("ttlValue");
+    const ttlNoteEl = document.getElementById("ttlNote");
     const step3 = document.getElementById("step3");
     const step4 = document.getElementById("step4");
     const statusText = document.getElementById("statusText");
     const metaText = document.getElementById("metaText");
     const healthDot = document.getElementById("healthDot");
+
+    const TTL_STEPS = [
+      { seconds: 3600, short: "1h", long: "one hour" },
+      { seconds: 14400, short: "4h", long: "four hours" },
+      { seconds: 43200, short: "12h", long: "twelve hours" },
+      { seconds: 86400, short: "1d", long: "one day" },
+      { seconds: 172800, short: "2d", long: "two days" },
+      { seconds: 604800, short: "1w", long: "one week" },
+      { seconds: 1209600, short: "2w", long: "two weeks" },
+      { seconds: 2592000, short: "30d", long: "thirty days" },
+    ];
+
+    function currentTtl() {
+      return TTL_STEPS[Number(ttlEl.value)] || TTL_STEPS[3];
+    }
+
+    function syncTtl() {
+      const step = currentTtl();
+      ttlValueEl.textContent = step.short;
+      ttlEl.setAttribute("aria-valuetext", step.long);
+      ttlNoteEl.textContent = "Everything in it is gone " + step.long + " after you generate it.";
+    }
+    ttlEl.addEventListener("input", syncTtl);
+    syncTtl();
 
     function syncSeats() {
       const n = Number(maxSeatsEl.value);
@@ -555,10 +601,11 @@ ${PAPER_TOKENS}
       for (const step of [step3, step4]) step.classList.remove("revealed");
       try {
         const max_seats = Number(maxSeatsEl.value);
+        const ttl = currentTtl();
         const res = await fetch("/v1/channels/reserve", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ max_seats }),
+          body: JSON.stringify({ max_seats, ttl_seconds: ttl.seconds }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -572,8 +619,14 @@ ${PAPER_TOKENS}
           void step.offsetWidth;
           step.classList.add("revealed");
         }
+        const expiryHint = document.getElementById("expiryHint");
+        if (data.absolute_expires_at) {
+          const when = new Date(data.absolute_expires_at);
+          expiryHint.textContent = "Expires " + when.toLocaleString() + ".";
+        }
         generateBtn.textContent = "Generate another";
-        metaText.textContent = "seats " + (data.max_seats || max_seats) + " · reserved";
+        metaText.textContent =
+          "seats " + (data.max_seats || max_seats) + " · " + ttl.short + " · reserved";
       } catch (e) {
         errEl.textContent = "Could not reserve: " + (e && e.message ? e.message : e);
         errEl.style.display = "block";
@@ -922,6 +975,36 @@ function parseMaxSeats(raw: unknown): { ok: true; value: number } | { ok: false 
   return { ok: true, value: raw };
 }
 
+/** Optional channel lifetime in seconds (1 hour .. 30 days).
+ *  Omitted → the 48h absolute / 24h idle defaults, unchanged. When given, the
+ *  channel lives exactly that long: the idle window is widened to match so an
+ *  untouched room still reaches the expiry the caller picked. */
+function parseChannelTtlSeconds(
+  raw: unknown,
+): { ok: true; ttlMs?: number } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true };
+  if (
+    typeof raw !== "number" ||
+    !Number.isInteger(raw) ||
+    raw < MIN_TTL_SECONDS ||
+    raw > MAX_TTL_SECONDS
+  ) {
+    return { ok: false };
+  }
+  return { ok: true, ttlMs: raw * 1000 };
+}
+
+/** Absolute + idle deadlines for a new channel, given an optional chosen ttl. */
+function channelDeadlines(now: number, ttlMs: number | undefined) {
+  const absoluteExpiresAt = now + (ttlMs ?? ABSOLUTE_TTL_MS);
+  const idleTtlMs = ttlMs ?? IDLE_TTL_MS;
+  return {
+    absoluteExpiresAt,
+    idleTtlMs,
+    idleExpiresAt: Math.min(absoluteExpiresAt, now + idleTtlMs),
+  };
+}
+
 /** Optional nick: omit/null/"" → none; else trim, 1–64 UTF-8 bytes. */
 function parseNick(raw: unknown): { ok: true; nick?: string } | { ok: false } {
   if (raw === undefined || raw === null) return { ok: true };
@@ -1147,7 +1230,7 @@ export function createApp(): Hono {
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
     // Body optional: empty → defaults; otherwise JSON with optional max_seats
-    let body: { max_seats?: unknown } = {};
+    let body: { max_seats?: unknown; ttl_seconds?: unknown } = {};
     const cl = c.req.header("content-length");
     if (cl) {
       const n = parseInt(cl, 10);
@@ -1166,7 +1249,7 @@ export function createApp(): Hono {
     }
     if (raw.trim()) {
       try {
-        body = JSON.parse(raw) as { max_seats?: unknown };
+        body = JSON.parse(raw) as { max_seats?: unknown; ttl_seconds?: unknown };
       } catch {
         return jsonError(c, 400, "invalid_json");
       }
@@ -1175,6 +1258,8 @@ export function createApp(): Hono {
     const maxParsed = parseMaxSeats(body.max_seats);
     if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
     const maxSeats = maxParsed.value;
+    const ttlParsed = parseChannelTtlSeconds(body.ttl_seconds);
+    if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
     const now = Date.now();
     let id: string;
     try {
@@ -1185,8 +1270,7 @@ export function createApp(): Hono {
     const ch: Channel = {
       id,
       createdAt: now,
-      absoluteExpiresAt: now + ABSOLUTE_TTL_MS,
-      idleExpiresAt: now + IDLE_TTL_MS,
+      ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
       seats: {},
       messages: [],
@@ -1199,6 +1283,7 @@ export function createApp(): Hono {
     return c.json({
       channel_id: id,
       max_seats: maxSeats,
+      ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
       idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
     });
@@ -1212,7 +1297,12 @@ export function createApp(): Hono {
     const ip = clientIp(c);
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
-    const parsed = await readJsonBody<{ public_key_pem?: string; max_seats?: unknown; nick?: unknown }>(c);
+    const parsed = await readJsonBody<{
+      public_key_pem?: string;
+      max_seats?: unknown;
+      ttl_seconds?: unknown;
+      nick?: unknown;
+    }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
@@ -1224,6 +1314,8 @@ export function createApp(): Hono {
     }
     const maxParsed = parseMaxSeats(body.max_seats);
     if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
+    const ttlParsed = parseChannelTtlSeconds(body.ttl_seconds);
+    if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
     const nickParsed = parseNick(body.nick);
     if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
     const maxSeats = maxParsed.value;
@@ -1244,8 +1336,7 @@ export function createApp(): Hono {
     const ch: Channel = {
       id,
       createdAt: now,
-      absoluteExpiresAt: now + ABSOLUTE_TTL_MS,
-      idleExpiresAt: now + IDLE_TTL_MS,
+      ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
       seats: {
         A: seatA,
@@ -1264,6 +1355,7 @@ export function createApp(): Hono {
       token: tok.token,
       expires_at: new Date(tok.expiresAt).toISOString(),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
+      ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       max_seats: maxSeats,
     };
     if (nickParsed.nick !== undefined) resp.nick = nickParsed.nick;
