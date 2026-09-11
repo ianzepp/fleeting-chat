@@ -233,6 +233,7 @@ export function scheduleSave(store: Store): void {
   if (!resolveDataDir()) return;
   pendingStore = store;
   if (saveTimer) clearTimeout(saveTimer);
+  // Keep the timer ref'd so a pending debounce can still flush before idle exit.
   saveTimer = setTimeout(() => {
     saveTimer = null;
     const s = pendingStore;
@@ -246,7 +247,25 @@ export function scheduleSave(store: Store): void {
       console.error("fleeting.chat: failed to persist store.json:", err);
     }
   }, SAVE_DEBOUNCE_MS);
-  if (typeof saveTimer.unref === "function") saveTimer.unref();
+}
+
+let shutdownHooksInstalled = false;
+
+/** Flush pending store.json on SIGTERM/SIGINT (Railway redeploys send SIGTERM). */
+export function installShutdownFlush(store: Store): void {
+  if (shutdownHooksInstalled) return;
+  shutdownHooksInstalled = true;
+  const onSignal = (signal: string) => {
+    try {
+      flushSync(store);
+      console.error(`fleeting.chat: flushed store.json on ${signal}`);
+    } catch (err) {
+      console.error(`fleeting.chat: flush on ${signal} failed:`, err);
+    }
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
+  process.on("SIGINT", () => onSignal("SIGINT"));
 }
 
 /** Load `{dataDir}/store.json` into `store` before serving. Skips expired rows. */

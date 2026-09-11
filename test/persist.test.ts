@@ -76,6 +76,25 @@ describe("JSON persistence", () => {
     process.env.DATA_DIR = dataDir;
   });
 
+
+  it("flushSync drains a pending debounced save", async () => {
+    const app = createApp();
+    const { publicPem } = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: publicPem, ttl_seconds: 3600 }),
+    });
+    assert.equal(created.status, 200);
+    const file = join(dataDir, "store.json");
+    // Debounce may not have fired yet; flushSync must force the write.
+    flushSync(store);
+    assert.equal(existsSync(file), true);
+    const disk = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(disk.channels.length, 1);
+    assert.equal(disk.channels[0].id, created.body.channel_id);
+  });
+
   it("roundtrip channel + message + token + file via flushSync/loadStore", async () => {
     const app = createApp();
     const a = ed25519PemPair();

@@ -1,12 +1,13 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
-import { loadStore } from "./persist.js";
+import { installShutdownFlush, loadStore } from "./persist.js";
 import { store } from "./store.js";
 
 const PORT = parseInt(process.env.PORT ?? "8787", 10);
 
 async function main(): Promise<void> {
   await loadStore(store);
+  installShutdownFlush(store);
   const app = createApp();
 
   // Periodic sweep of expired channels/tokens
