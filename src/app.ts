@@ -27,7 +27,7 @@ import {
   MAX_MAX_SEATS,
   NICK_MAX_BYTES,
   assignSeats,
-  nextSeatLetter,
+  nextSeat,
   normalizeChannelId,
   type Channel,
   type ChannelFile,
@@ -529,7 +529,7 @@ ${PAPER_TOKENS}
               <button type="button" id="copyLink">Copy Link</button>
               <button type="button" class="ghost" id="copyId">Copy ID Only</button>
             </div>
-            <p class="hint">Paste the id straight to your agent, or send the link to the other person. Agents read <code>/llms.txt</code> and connect themselves — opening the link joins nothing. First to bind takes seat A, then B, until full. <span id="expiryHint"></span></p>
+            <p class="hint">Paste the id straight to your agent, or send the link to the other person. Agents read <code>/llms.txt</code> and connect themselves — opening the link joins nothing. First to bind takes seat 1, then 2, until full. <span id="expiryHint"></span></p>
           </div>
         </li>
       </ol>
@@ -1320,7 +1320,7 @@ export function createApp(): Hono {
     });
   });
 
-  // Create channel → reserve+bind seat A (shortcut)
+  // Create channel → reserve+bind seat "1" (shortcut)
   app.post("/v1/channels", async (c) => {
     store.sweep();
     const badCt = rejectIfNotJson(c);
@@ -1358,19 +1358,19 @@ export function createApp(): Hono {
       return jsonError(c, 503, "channel_id_exhausted");
     }
     const pem = normalizePem(body.public_key_pem);
-    const seatA: Channel["seats"]["A"] = {
+    const seat1: Channel["seats"]["1"] = {
       publicKeyPem: pem,
       rateWindowStart: now,
       rateCount: 0,
     };
-    if (nickParsed.nick !== undefined) seatA!.nick = nickParsed.nick;
+    if (nickParsed.nick !== undefined) seat1!.nick = nickParsed.nick;
     const ch: Channel = {
       id,
       createdAt: now,
       ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
       seats: {
-        A: seatA,
+        "1": seat1,
       },
       messages: [],
       nextMsgSeq: 1,
@@ -1379,11 +1379,11 @@ export function createApp(): Hono {
     };
     store.channels.set(id, ch);
     store.markDirty();
-    const tok = mintToken(id, "A", now);
+    const tok = mintToken(id, "1", now);
     setApiSecurityHeaders(c);
     const resp: Record<string, unknown> = {
       channel_id: id,
-      seat: "A",
+      seat: "1",
       token: tok.token,
       expires_at: new Date(tok.expiresAt).toISOString(),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
@@ -1394,7 +1394,7 @@ export function createApp(): Hono {
     return c.json(resp);
   });
 
-  // Join channel → next free seat (B, C, …) or remint existing seat
+  // Join channel → next free seat ("2", "3", …) or remint existing seat
   app.post("/v1/channels/:id/join", async (c) => {
     store.sweep();
     const badCt = rejectIfNotJson(c);
@@ -1439,7 +1439,7 @@ export function createApp(): Hono {
       setApiSecurityHeaders(c);
       return c.json(seatPayload(existing, tok, ch.maxSeats, seatState.nick));
     }
-    const seat = nextSeatLetter(ch);
+    const seat = nextSeat(ch);
     if (!seat) return jsonError(c, 409, "channel_full");
     const now = Date.now();
     const seatState: NonNullable<Channel["seats"][Seat]> = {

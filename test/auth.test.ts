@@ -69,7 +69,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     assert.equal(create.status, 200);
-    assert.equal(create.body.seat, "A");
+    assert.equal(create.body.seat, "1");
     assert.equal(create.body.max_seats, 2);
     assert.match(create.body.channel_id, /^\d{3}-\d{3}-\d{3}$/);
     const channelId = create.body.channel_id as string;
@@ -81,7 +81,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(join.status, 200);
-    assert.equal(join.body.seat, "B");
+    assert.equal(join.body.seat, "2");
     assert.equal(join.body.max_seats, 2);
     const tokenB = join.body.token as string;
 
@@ -104,7 +104,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ body: "ping" }),
     });
     assert.equal(send.status, 201);
-    assert.equal(send.body.message.from, "A");
+    assert.equal(send.body.message.from, "1");
 
     const poll = await json(app, `/v1/channels/${channelId}/messages?after=0`, {
       headers: { Authorization: `Bearer ${tokenB}` },
@@ -131,7 +131,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     assert.equal(rejoin.status, 200);
-    assert.equal(rejoin.body.seat, "A");
+    assert.equal(rejoin.body.seat, "1");
     assert.ok(rejoin.body.token);
     assert.notEqual(rejoin.body.token, create.body.token);
     // still only A occupied — B can join
@@ -141,10 +141,10 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(joinB.status, 200);
-    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.seat, "2");
   });
 
-  it("max_seats 3 allows two joins then channel_full; messages from C", async () => {
+  it("max_seats 3 allows two joins then channel_full; messages from seat 3", async () => {
     freshStore();
     const app = createApp();
     const a = ed25519PemPair();
@@ -166,7 +166,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(joinB.status, 200);
-    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.seat, "2");
     assert.equal(joinB.body.max_seats, 3);
 
     const joinC = await json(app, `/v1/channels/${channelId}/join`, {
@@ -175,7 +175,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: c.publicPem }),
     });
     assert.equal(joinC.status, 200);
-    assert.equal(joinC.body.seat, "C");
+    assert.equal(joinC.body.seat, "3");
     const tokenC = joinC.body.token as string;
 
     const full = await json(app, `/v1/channels/${channelId}/join`, {
@@ -195,14 +195,14 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ body: "from C" }),
     });
     assert.equal(send.status, 201);
-    assert.equal(send.body.message.from, "C");
+    assert.equal(send.body.message.from, "3");
 
     const poll = await json(app, `/v1/channels/${channelId}/messages?after=0`, {
       headers: { Authorization: `Bearer ${create.body.token}` },
     });
     assert.equal(poll.status, 200);
     assert.equal(poll.body.messages.length, 1);
-    assert.equal(poll.body.messages[0].from, "C");
+    assert.equal(poll.body.messages[0].from, "3");
     assert.equal(poll.body.messages[0].body, "from C");
   });
 
@@ -335,7 +335,7 @@ describe("fleeting.chat spike", () => {
       }),
     });
     assert.equal(tok.status, 200);
-    assert.equal(tok.body.seat, "A");
+    assert.equal(tok.body.seat, "1");
     assert.ok(tok.body.token);
   });
 
@@ -381,7 +381,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(replay.body.error, "invalid_or_expired_challenge");
   });
 
-  it("reserve empty → join A → join B", async () => {
+  it("reserve empty → join seat 1 → join seat 2", async () => {
     freshStore();
     const app = createApp();
     const a = ed25519PemPair();
@@ -409,7 +409,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     assert.equal(joinA.status, 200);
-    assert.equal(joinA.body.seat, "A");
+    assert.equal(joinA.body.seat, "1");
     assert.equal(joinA.body.max_seats, 2);
 
     const joinB = await json(app, `/v1/channels/${channelId}/join`, {
@@ -418,7 +418,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(joinB.status, 200);
-    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.seat, "2");
   });
 
   it("reserve max_seats 3 → three joins then 409", async () => {
@@ -444,7 +444,7 @@ describe("fleeting.chat spike", () => {
       assert.equal(join.status, 200, `join ${i}`);
       seats.push(join.body.seat as string);
     }
-    assert.deepEqual(seats, ["A", "B", "C"]);
+    assert.deepEqual(seats, ["1", "2", "3"]);
 
     const full = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
@@ -630,7 +630,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     assert.equal(joinA.status, 200);
-    assert.equal(joinA.body.seat, "A");
+    assert.equal(joinA.body.seat, "1");
 
     const joinB = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
@@ -638,7 +638,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(joinB.status, 200);
-    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.seat, "2");
   });
 
   it("join accepts undashed 9-digit form same as canonical", async () => {
@@ -663,7 +663,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem }),
     });
     assert.equal(joinA.status, 200);
-    assert.equal(joinA.body.seat, "A");
+    assert.equal(joinA.body.seat, "1");
 
     const joinB = await json(app, `/v1/channels/${channelId}/join`, {
       method: "POST",
@@ -671,7 +671,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem }),
     });
     assert.equal(joinB.status, 200);
-    assert.equal(joinB.body.seat, "B");
+    assert.equal(joinB.body.seat, "2");
 
     // auth challenge also accepts undashed
     const ch = await json(app, "/v1/auth/challenge", {
@@ -789,7 +789,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: b.publicPem, nick: "bob" }),
     });
     assert.equal(join.status, 200);
-    assert.equal(join.body.seat, "B");
+    assert.equal(join.body.seat, "2");
     assert.equal(join.body.nick, "bob");
     const tokenB = join.body.token as string;
 
@@ -802,7 +802,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ body: "hi from alice" }),
     });
     assert.equal(sendA.status, 201);
-    assert.equal(sendA.body.message.from, "A");
+    assert.equal(sendA.body.message.from, "1");
     assert.equal(sendA.body.message.nick, "alice");
     assert.equal(sendA.body.message.body, "hi from alice");
 
@@ -832,7 +832,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ public_key_pem: a.publicPem, nick: "alice2" }),
     });
     assert.equal(rejoin.status, 200);
-    assert.equal(rejoin.body.seat, "A");
+    assert.equal(rejoin.body.seat, "1");
     assert.equal(rejoin.body.nick, "alice2");
     assert.notEqual(rejoin.body.token, tokenA);
 
@@ -936,7 +936,7 @@ describe("fleeting.chat spike", () => {
       body: JSON.stringify({ body: "anon" }),
     });
     assert.equal(send.status, 201);
-    assert.equal(send.body.message.from, "A");
+    assert.equal(send.body.message.from, "1");
     assert.equal(send.body.message.nick, undefined);
   });
 
@@ -992,7 +992,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(up.body.filename, "calendar.ics");
     assert.equal(up.body.content_type, "text/calendar");
     assert.equal(up.body.bytes, payload.length);
-    assert.equal(up.body.seat, "A");
+    assert.equal(up.body.seat, "1");
     assert.ok(up.body.file_id);
     assert.ok(up.body.expires_at);
     assert.equal(up.body.content_base64, undefined);
@@ -1006,7 +1006,7 @@ describe("fleeting.chat spike", () => {
     assert.equal(down.body.filename, "calendar.ics");
     assert.equal(down.body.content_type, "text/calendar");
     assert.equal(down.body.bytes, payload.length);
-    assert.equal(down.body.seat, "A");
+    assert.equal(down.body.seat, "1");
     assert.equal(down.body.file_id, up.body.file_id);
     assert.equal(Buffer.from(down.body.content_base64, "base64").toString("utf8"), payload.toString("utf8"));
   });
@@ -1173,7 +1173,7 @@ describe("fleeting.chat spike", () => {
     const agent = ed25519PemPair();
     const other = ed25519PemPair();
 
-    // Two channels with the same agent pubkey as seat A
+    // Two channels with the same agent pubkey as seat 1
     const c1 = await json(app, "/v1/channels", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

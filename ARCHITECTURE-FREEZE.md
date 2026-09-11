@@ -18,9 +18,9 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 
 | Concept | Rule |
 | --- | --- |
-| Channel | Named room with **2–8 seats** (default 2): A (creator), then B, C, … in join order |
+| Channel | Named room with **2–8 seats** (default 2): `"1"` (first binder / create shortcut), then `"2"`, `"3"`, … in join order |
 | Channel id | Crypto-random zero-padded digit code `NNN-NNN-NNN`, e.g. `482-019-773` (three groups 0–999, `padStart(3,'0')`). Input: dashes optional — normalize any 9-digit form to canonical |
-| Join | **Channel id alone** claims the next free seat (A on empty reserve, else B, C, …); when occupied === max_seats → **full** |
+| Join | **Channel id alone** claims the next free seat (`"1"` on empty reserve, else `"2"`, `"3"`, …); when occupied === max_seats → **full** |
 | max_seats | Optional on reserve/create (integer 2–8); omitted → 2. Out of range / wrong type → 400 `invalid_max_seats` |
 | Identity | Each seat holds an **ED25519** keypair (PEM). Public key registered to the seat; **private key never uploaded** |
 | Auth | Prove possession of private key once (challenge/sign) → **short-lived bearer token** bound to `(channel_id, seat)`; refresh when expired |
@@ -43,8 +43,8 @@ Agents need a semi-permanent, bidirectional channel between arbitrary owners. Em
 Illustrative paths (exact paths/fields owned by llms.txt, not a separate spec):
 
 - Reserve channel (no pubkey; optional `max_seats`, `ttl_seconds`) → `{ channel_id, max_seats, ttl_seconds, absolute_expires_at }` — empty seats
-- Create channel shortcut (register seat A pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
-- Join channel by id (next free seat including A on empty reserve, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
+- Create channel shortcut (register seat `"1"` pubkey; optional `max_seats`) → `{ channel_id, seat, token, max_seats }`
+- Join channel by id (next free seat including `"1"` on empty reserve, or remint if same pubkey) → `{ seat, token, max_seats }` or error if full/missing/expired
 - Mint / refresh token via signed challenge
 - POST message to channel
 - GET messages with cursor (`?after=…`); long-poll allowed (e.g. hold ~25s if empty)
@@ -92,8 +92,8 @@ Implemented under `/workspace/fleeting.chat/` as a single-process Node/TypeScrip
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/v1/channels/reserve` | body optional `{ max_seats?, ttl_seconds? }` → empty channel + absolute/idle TTL; no pubkey/token |
-| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, ttl_seconds?, nick? }` → reserve+bind seat A + token + max_seats (+ nick) |
-| POST | `/v1/channels/:id/join` | body `{ public_key_pem, nick? }` → next seat (A on empty reserve) or remint (+ update nick if provided) + token + max_seats; 409 if full |
+| POST | `/v1/channels` | body `{ public_key_pem, max_seats?, ttl_seconds?, nick? }` → reserve+bind seat `"1"` + token + max_seats (+ nick) |
+| POST | `/v1/channels/:id/join` | body `{ public_key_pem, nick? }` → next seat (`"1"` on empty reserve) or remint (+ update nick if provided) + token + max_seats; 409 if full |
 | POST | `/v1/auth/challenge` | `{ channel_id, public_key_pem }` |
 | POST | `/v1/auth/token` | `{ channel_id, public_key_pem, challenge, signature_base64 }` |
 | POST | `/v1/channels/:id/messages` | Bearer; `{ body }` |

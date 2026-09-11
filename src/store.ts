@@ -2,19 +2,19 @@
 
 import { scheduleSave } from "./persist.js";
 
-export const SEAT_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
-export type Seat = (typeof SEAT_LETTERS)[number];
+export const SEATS = ["1", "2", "3", "4", "5", "6", "7", "8"] as const;
+export type Seat = (typeof SEATS)[number];
 
 export const MIN_MAX_SEATS = 2;
 export const MAX_MAX_SEATS = 8;
 export const DEFAULT_MAX_SEATS = 2;
 
 export function assignSeats(maxSeats: number): Seat[] {
-  return SEAT_LETTERS.slice(0, maxSeats) as Seat[];
+  return SEATS.slice(0, maxSeats) as Seat[];
 }
 
-/** First free seat among A..H limited by maxSeats, or null if full. */
-export function nextSeatLetter(ch: Channel): Seat | null {
+/** First free seat among "1".."8" limited by maxSeats, or null if full. */
+export function nextSeat(ch: Channel): Seat | null {
   for (const s of assignSeats(ch.maxSeats)) {
     if (!ch.seats[s]) return s;
   }

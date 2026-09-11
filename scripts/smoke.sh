@@ -39,7 +39,7 @@ echo "$CREATE"
 CHANNEL_ID=$(echo "$CREATE" | json_field '["channel_id"]')
 TOKEN_A=$(echo "$CREATE" | json_field '["token"]')
 SEAT_A=$(echo "$CREATE" | json_field '["seat"]')
-test "$SEAT_A" = "A"
+test "$SEAT_A" = "1"
 test -n "$CHANNEL_ID"
 echo "channel_id=$CHANNEL_ID"
 
@@ -50,7 +50,7 @@ JOIN=$(curl -sfS -X POST "$BASE/v1/channels/${CHANNEL_ID}/join" \
 echo "$JOIN"
 TOKEN_B=$(echo "$JOIN" | json_field '["token"]')
 SEAT_B=$(echo "$JOIN" | json_field '["seat"]')
-test "$SEAT_B" = "B"
+test "$SEAT_B" = "2"
 
 echo "== second join should 409 =="
 CODE=$(curl -sS -o /tmp/fleeting-join2.json -w '%{http_code}' -X POST "$BASE/v1/channels/${CHANNEL_ID}/join" \
@@ -77,7 +77,7 @@ echo "== B polls =="
 POLL_B=$(curl -sfS "$BASE/v1/channels/${CHANNEL_ID}/messages?after=0" \
   -H "Authorization: Bearer $TOKEN_B")
 echo "$POLL_B"
-echo "$POLL_B" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"]; assert any(x["body"]=="hello from A" and x["from"]=="A" for x in m)'
+echo "$POLL_B" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"]; assert any(x["body"]=="hello from A" and x["from"]=="1" for x in m)'
 
 echo "== B sends =="
 SEND_B=$(curl -sfS -X POST "$BASE/v1/channels/${CHANNEL_ID}/messages" \
@@ -91,7 +91,7 @@ echo "== A polls after cursor =="
 POLL_A=$(curl -sfS "$BASE/v1/channels/${CHANNEL_ID}/messages?after=${CURSOR}" \
   -H "Authorization: Bearer $TOKEN_A")
 echo "$POLL_A"
-echo "$POLL_A" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"]; assert any(x["body"]=="hello from B" and x["from"]=="B" for x in m)'
+echo "$POLL_A" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"]; assert any(x["body"]=="hello from B" and x["from"]=="2" for x in m)'
 
 echo "== refresh token via challenge (A) =="
 CH=$(curl -sfS -X POST "$BASE/v1/auth/challenge" \

@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync, sign } from "node:crypto";
@@ -143,8 +143,8 @@ describe("JSON persistence", () => {
     const ch = store.channels.get(channelId);
     assert.ok(ch);
     assert.equal(ch!.waiters.length, 0);
-    assert.equal(ch!.seats.A?.nick, "alice");
-    assert.equal(ch!.seats.B?.nick, "bob");
+    assert.equal(ch!.seats["1"]?.nick, "alice");
+    assert.equal(ch!.seats["2"]?.nick, "bob");
     assert.equal(ch!.messages.length, 1);
     assert.equal(ch!.messages[0].body, "persisted hi");
     assert.ok(ch!.files.has(fileId));
@@ -219,4 +219,79 @@ describe("JSON persistence", () => {
     assert.ok(store.agentTokens.has(agentToken));
     assert.equal(store.agentChallenges.has(challenge), false); // consumed
   });
+
+  it("migrates legacy letter seats A–H to \"1\"–\"8\" on load", async () => {
+    const now = Date.now();
+    const disk = {
+      version: 1,
+      channels: [
+        {
+          id: "111-222-333",
+          createdAt: now,
+          absoluteExpiresAt: now + 3600_000,
+          idleExpiresAt: now + 3600_000,
+          idleTtlMs: 3600_000,
+          maxSeats: 2,
+          seats: {
+            A: {
+              publicKeyPem: "pem-a",
+              rateWindowStart: now,
+              rateCount: 0,
+              nick: "alice",
+            },
+            B: {
+              publicKeyPem: "pem-b",
+              rateWindowStart: now,
+              rateCount: 0,
+              nick: "bob",
+            },
+          },
+          messages: [
+            {
+              id: "m1",
+              from: "A",
+              ts: new Date(now).toISOString(),
+              body: "hi",
+            },
+          ],
+          nextMsgSeq: 2,
+          files: {
+            f1: {
+              filename: "x.txt",
+              contentType: "text/plain",
+              bytes: Buffer.from("x").toString("base64"),
+              createdAt: now,
+              expiresAt: now + 3600_000,
+              seat: "A",
+            },
+          },
+        },
+      ],
+      tokens: [
+        {
+          token: "tok-legacy",
+          channelId: "111-222-333",
+          seat: "A",
+          expiresAt: now + 3600_000,
+        },
+      ],
+      challenges: [],
+      agentTokens: [],
+      agentChallenges: [],
+      usedChannelIds: ["111-222-333"],
+    };
+    const path = join(dataDir, "store.json");
+    writeFileSync(path, JSON.stringify(disk), "utf8");
+    freshStore();
+    await loadStore(store);
+    const ch = store.channels.get("111-222-333");
+    assert.ok(ch);
+    assert.equal(ch!.seats["1"]?.nick, "alice");
+    assert.equal(ch!.seats["2"]?.nick, "bob");
+    assert.ok(!("A" in ch!.seats));
+    assert.equal(ch!.messages[0].from, "1");
+    assert.equal(ch!.files.get("f1")!.seat, "1");
+    assert.equal(store.tokens.get("tok-legacy")!.seat, "1");
+  });
+
 });

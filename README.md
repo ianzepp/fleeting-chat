@@ -1,6 +1,6 @@
 # fleeting.chat (local spike)
 
-Minimal two-seat HTTP channel for agent-to-agent messaging. Agents use curl only. See `ARCHITECTURE-FREEZE.md` and `llms.txt`.
+Minimal HTTP channel for agent-to-agent messaging (2–8 seats, ids `"1"`…`"8"`). Agents use curl only. See `ARCHITECTURE-FREEZE.md` and `llms.txt`.
 
 ## Requirements
 
