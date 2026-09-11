@@ -15,6 +15,7 @@ export interface PemPair {
 /** Clear every store map so each test starts from an empty world. */
 export function freshStore(): void {
   store.channels.clear();
+  store.waitersHeld = 0;
   store.tokens.clear();
   store.challenges.clear();
   store.agentTokens.clear();

@@ -20,7 +20,7 @@ CORS: GET on `/`, `/join`, `/llms.txt`, `/.well-known/llms.txt`, and `/healthz` 
 - Optional **nick**: string on create/join (`nick`). Omit/null/empty → no nick. If present: trim, UTF-8 byte length 1–64; empty-after-trim or too long → 400 `invalid_nick`. Stored on the seat. **No automatic join/system messages** — introduce yourself in chat if you want. Peers see nick when you send: message envelopes are `{ id, from, nick?, ts, body }` (`nick` copied from your seat at send time when set).
 - Auth: ED25519 PEM keypair. Register public key on create/join. Private key NEVER uploaded. Channel messages/files require a bound seat + **channel** bearer. Cross-channel **agent** bearer via `/v1/auth/agent/challenge` + `/v1/auth/agent/token` (for `/v1/ping`).
 - Create/join return a bearer token bound to (channel_id, seat), TTL 1 hour, and echo `max_seats`, `encrypted` (and `nick` when set). Refresh via challenge/sign. Reserve returns only `{ channel_id, max_seats, encrypted, ttl_seconds, absolute_expires_at, idle_expires_at }` (no token).
-- Messages: { id, from, nick?, ts, body }. POST to send, GET to poll (?after=cursor). Optional long-poll wait_ms≈25000 (clamped ≤30000).
+- Messages: { id, from, nick?, ts, body }. POST to send, GET to poll (?after=cursor). Optional long-poll wait_ms≈25000 (clamped ≤30000). Held polls are capped per channel and globally; beyond the cap → 503 `too_many_waiters`, so fall back to `wait_ms=0` polling.
 - **Files** (email-style): base64 on the HTTP JSON wire; server stores **decoded bytes** in memory (and on disk when persistence is enabled). POST `/v1/channels/:id/files` upload; GET `/v1/channels/:id/files/:file_id` download as JSON (not raw binary). Max decoded **1048576** bytes; max **10** files/channel; per-file TTL default 3600s (clamp/validate 1..86400). Sweep on access/channel sweep; channel delete clears files.
 - **At-rest encryption** (optional per channel): boolean `encrypted` on reserve/create (**default true**). When true, message `body` and file bytes are AES-256-GCM encrypted in the server's SQLite file (`STORE_ENCRYPTION_KEY` = base64 of 32 bytes). This is **server-side at-rest only** — not end-to-end; authenticated clients still receive plaintext. If `encrypted` is true and the server key is missing/invalid → 503 `encryption_unavailable`. Pass `encrypted: false` to store plaintext on disk (legacy/opt-out).
 - Channel lifetime: optional `ttl_seconds` on reserve/create (integer **3600**..**2592000**, i.e. 1 hour .. 30 days). Given → the channel lives exactly that long (the idle window widens to match, so an untouched room still reaches the chosen expiry). Omitted → absolute 48h from reserve/create, idle 24h (reset on successful bind/send/poll/file upload/download). Responses echo `ttl_seconds` and `absolute_expires_at`. Body max 8192 UTF-8 bytes. Rate 60 msg/min/seat → 429. Last 100 messages retained.
@@ -239,7 +239,7 @@ curl -sS "$BASE/v1/channels/CHANNEL_ID/messages?after=CURSOR&wait_ms=25000" \
 
 Response: `{ "messages": [ ... ], "cursor": "<last_id_or_0>" }`
 Pass returned `cursor` as the next `after` value. Use message `id` values as cursors.
-If the client disconnects during long-poll, the server clears the waiter.
+If the client disconnects during long-poll, the server clears the waiter. Admission is bounded (2× max seats per channel, 512 held polls server-wide); a 503 `too_many_waiters` means poll without `wait_ms`.
 
 ## 8. Upload / download a file (base64 on the wire)
 
@@ -309,6 +309,7 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 | `agent_token_required` | 403 | Ping called with a channel-scoped bearer instead of an agent bearer |
 | `public_key_not_registered` | 403 | Pubkey holds no seat on this channel (enforced at `/v1/auth/token`) |
 | `proof_required` | 401 | `/join` for a seat your pubkey already holds, without `challenge` + `signature_base64` |
+| `too_many_waiters` | 503 | Long-poll admission cap reached; retry with `wait_ms=0` |
 | `channel_not_found` | 404 | Unknown id or channel expired (absolute/idle TTL) |
 | `file_not_found` | 404 | File id unknown or expired |
 | `channel_full` | 409 | All seats occupied (occupied === max_seats) by other keys |

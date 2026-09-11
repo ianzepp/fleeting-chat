@@ -9,6 +9,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createApp } from "../src/app.js";
+import { MAX_TOTAL_WAITERS, MAX_WAITERS_PER_CHANNEL, store } from "../src/store.js";
 import {
   bearer,
   ed25519PemPair,
@@ -406,5 +407,77 @@ describe("seat takeover via re-join (BH-AUTH-001)", () => {
     const joined = await json(app, `/v1/channels/${id}/join`, postJson({ public_key_pem: peer.publicPem }));
     assert.equal(joined.status, 200, JSON.stringify(joined.body));
     assert.equal(joined.body.seat, "2");
+  });
+});
+
+describe("long-poll admission (BH-DOS-002)", () => {
+  beforeEach(() => freshStore());
+
+  /** Short polling is always available; a held poll is what we bound. */
+  async function openPoll(app: App, id: string, token: string, ms = 30_000) {
+    const ctrl = new AbortController();
+    const settled = app
+      .request(`/v1/channels/${id}/messages?wait_ms=${ms}`, {
+        headers: bearer(token),
+        signal: ctrl.signal,
+      })
+      .catch(() => null);
+    return { ctrl, settled };
+  }
+
+  /** 0 means the server never answered within the window. */
+  async function pollWithin(app: App, id: string, token: string, windowMs: number) {
+    try {
+      const res = await app.request(`/v1/channels/${id}/messages?wait_ms=30000`, {
+        headers: bearer(token),
+        signal: AbortSignal.timeout(windowMs),
+      });
+      return res.status;
+    } catch {
+      return 0;
+    }
+  }
+
+  it("refuses a poll beyond the per-channel waiter cap and releases capacity after", async () => {
+    const app = createApp();
+    const channel = await newChannel(app);
+    const held = [];
+    for (let i = 0; i < MAX_WAITERS_PER_CHANNEL; i++) {
+      held.push(await openPoll(app, channel.id, channel.token));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(store.waitersHeld, MAX_WAITERS_PER_CHANNEL);
+
+    const overflow = await pollWithin(app, channel.id, channel.token, 2000);
+    assert.equal(overflow, 503, "a flood of held polls was admitted");
+
+    for (const h of held) h.ctrl.abort();
+    await Promise.allSettled(held.map((h) => h.settled));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(store.waitersHeld, 0, "waiter accounting drifted");
+
+    const afterRelease = await json(app, `/v1/channels/${channel.id}/messages?wait_ms=0`, {
+      headers: bearer(channel.token),
+    });
+    assert.equal(afterRelease.status, 200);
+  });
+
+  it("refuses a poll once the global waiter budget is spent", async () => {
+    const app = createApp();
+    const channel = await newChannel(app);
+    store.waitersHeld = MAX_TOTAL_WAITERS;
+
+    const res = await json(app, `/v1/channels/${channel.id}/messages?wait_ms=30000`, {
+      headers: bearer(channel.token),
+    });
+    assert.equal(res.status, 503);
+    assert.equal(res.body.error, "too_many_waiters");
+
+    // Short polls are unaffected: only holding a connection is bounded.
+    store.waitersHeld = 0;
+    const short = await json(app, `/v1/channels/${channel.id}/messages?wait_ms=0`, {
+      headers: bearer(channel.token),
+    });
+    assert.equal(short.status, 200);
   });
 });

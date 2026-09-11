@@ -83,6 +83,9 @@ export interface Channel {
   }>;
 }
 
+/** One held long poll. */
+export type Waiter = Channel["waiters"][number];
+
 export interface TokenRecord {
   token: string;
   channelId: string;
@@ -142,6 +145,11 @@ export const IP_RATE_LIMIT_PER_MIN = 30;
 export const MESSAGE_RETAIN = 100;
 export const DEFAULT_LONG_POLL_MS = 25_000;
 export const MAX_LONG_POLL_MS = 30_000;
+/** A held long poll costs a socket and a timer, and a client can open them faster
+ *  than they expire. Per channel the ceiling is twice the largest seat count, so
+ *  one retry per seat still fits; globally the budget bounds the fan-out. */
+export const MAX_WAITERS_PER_CHANNEL = MAX_MAX_SEATS * 2;
+export const MAX_TOTAL_WAITERS = 512;
 
 export const CHANNEL_ID_RE = /^\d{3}-\d{3}-\d{3}$/;
 
@@ -167,6 +175,9 @@ export class Store {
   usedChannelIds = new Set<string>();
   /** create + join + auth + file upload requests per IP */
   ipRate = new Map<string, IpRateWindow>();
+  /** Live long polls across every channel. Only the waiter helpers below write
+   *  it, so the global cap cannot drift from the per-channel arrays. */
+  waitersHeld = 0;
 
   /** Schedule a debounced persist when a data dir is configured. */
   markDirty(): void {
@@ -193,14 +204,37 @@ export class Store {
     this.markDirty();
   }
 
+  /** Whether a long poll may be held right now. Checked immediately before
+   *  holdWaiter in the same synchronous turn, so admission cannot race. */
+  canHoldWaiter(ch: Channel): boolean {
+    return (
+      ch.waiters.length < MAX_WAITERS_PER_CHANNEL && this.waitersHeld < MAX_TOTAL_WAITERS
+    );
+  }
+
+  holdWaiter(ch: Channel, waiter: Waiter): void {
+    ch.waiters.push(waiter);
+    this.waitersHeld += 1;
+  }
+
+  /** Returns false when the waiter was already settled. */
+  releaseWaiter(ch: Channel, waiter: Waiter): boolean {
+    const i = ch.waiters.indexOf(waiter);
+    if (i < 0) return false;
+    ch.waiters.splice(i, 1);
+    this.waitersHeld -= 1;
+    return true;
+  }
+
   deleteChannel(id: string): void {
     const ch = this.channels.get(id);
     if (ch) {
-      for (const w of ch.waiters) {
+      for (const w of [...ch.waiters]) {
         clearTimeout(w.timer);
         if (w.signal && w.abortHandler) {
           w.signal.removeEventListener("abort", w.abortHandler);
         }
+        this.releaseWaiter(ch, w);
         w.resolve([]);
       }
       ch.waiters = [];

@@ -34,6 +34,7 @@ import {
   type ChannelFile,
   type Message,
   type Seat,
+  type Waiter,
 } from "./store.js";
 import {
   normalizePem,
@@ -1186,34 +1187,29 @@ function appendMessage(ch: Channel, from: Seat, body: string): Message {
   while (ch.messages.length > MESSAGE_RETAIN) ch.messages.shift();
   store.markDirty();
 
-  const still: typeof ch.waiters = [];
-  for (const w of ch.waiters) {
+  for (const w of [...ch.waiters]) {
     const batch = messagesAfter(ch, w.after);
-    if (batch.length > 0) {
-      clearTimeout(w.timer);
-      if (w.signal && w.abortHandler) {
-        w.signal.removeEventListener("abort", w.abortHandler);
-      }
-      w.resolve(batch);
-    } else {
-      still.push(w);
+    if (batch.length === 0) continue;
+    clearTimeout(w.timer);
+    if (w.signal && w.abortHandler) {
+      w.signal.removeEventListener("abort", w.abortHandler);
     }
+    store.releaseWaiter(ch, w);
+    w.resolve(batch);
   }
-  ch.waiters = still;
   return msg;
 }
 
 function clearWaiter(
   ch: Channel,
-  waiter: Channel["waiters"][number],
+  waiter: Waiter,
   msgs: Message[]
 ): void {
   clearTimeout(waiter.timer);
   if (waiter.signal && waiter.abortHandler) {
     waiter.signal.removeEventListener("abort", waiter.abortHandler);
   }
-  const i = ch.waiters.indexOf(waiter);
-  if (i >= 0) ch.waiters.splice(i, 1);
+  store.releaseWaiter(ch, waiter);
   waiter.resolve(msgs);
 }
 
@@ -1915,9 +1911,18 @@ export function createApp(): Hono {
 
     const hold = waitMs || DEFAULT_LONG_POLL_MS;
     const signal = c.req.raw.signal;
+    if (!store.canHoldWaiter(ch)) {
+      setApiSecurityHeaders(c);
+      return jsonError(
+        c,
+        503,
+        "too_many_waiters",
+        "poll again without wait_ms, or after an in-flight long poll completes"
+      );
+    }
 
     const msgs = await new Promise<Message[]>((resolve) => {
-      const waiter: Channel["waiters"][number] = {
+      const waiter: Waiter = {
         after,
         resolve,
         timer: setTimeout(() => {
@@ -1937,7 +1942,7 @@ export function createApp(): Hono {
         }
         signal.addEventListener("abort", abortHandler);
       }
-      ch.waiters.push(waiter);
+      store.holdWaiter(ch, waiter);
     });
 
     if (!store.channels.has(id)) {
