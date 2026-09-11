@@ -9,7 +9,13 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createApp } from "../src/app.js";
-import { IP_RATE_LIMIT_PER_MIN, MAX_TOTAL_WAITERS, MAX_WAITERS_PER_CHANNEL, store } from "../src/store.js";
+import {
+  IP_RATE_LIMIT_PER_MIN,
+  MAX_TOTAL_WAITERS,
+  MAX_WAITERS_PER_CHANNEL,
+  RAW_BODY_MAX_BYTES,
+  store,
+} from "../src/store.js";
 import {
   bearer,
   ed25519PemPair,
@@ -529,5 +535,60 @@ describe("client identity for throttling (BH-RATE-001)", () => {
       undefined,
       `trusted-proxy mode throttled a legitimate rotation: ${JSON.stringify(codes)}`
     );
+  });
+});
+
+describe("request body limits (BH-BODY-001)", () => {
+  beforeEach(() => freshStore());
+
+  /** A body far over the cap, with no Content-Length, counting what the server pulls. */
+  function floodStream(totalBytes: number, chunkBytes = 16 * 1024) {
+    let produced = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= totalBytes) {
+          controller.close();
+          return;
+        }
+        const size = Math.min(chunkBytes, totalBytes - produced);
+        produced += size;
+        controller.enqueue(new Uint8Array(size).fill(0x61));
+      },
+    });
+    return { body, produced: () => produced };
+  }
+
+  // A streamed body needs duplex: "half" on the fetch side.
+  const streamed: RequestInit & { duplex: "half" } = { duplex: "half" };
+
+  it("stops reading a chunked body once the cap is crossed", async () => {
+    const app = createApp();
+    const total = RAW_BODY_MAX_BYTES * 32;
+    const flood = floodStream(total);
+    const init: RequestInit = {
+      ...streamed,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: flood.body,
+    };
+    const res = await app.request("/v1/channels/reserve", init);
+
+    assert.equal(res.status, 413);
+    assert.equal((await res.json()).error, "body_too_large");
+    assert.ok(
+      flood.produced() < total,
+      `server read the entire oversized body (${flood.produced()} of ${total} bytes)`
+    );
+  });
+
+  it("still accepts a valid body through the same path", async () => {
+    const app = createApp();
+    const res = await json(
+      app,
+      "/v1/channels/reserve",
+      postJson({ max_seats: 3, encrypted: false })
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.max_seats, 3);
   });
 });

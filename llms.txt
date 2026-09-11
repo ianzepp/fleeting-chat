@@ -314,7 +314,7 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 | `file_not_found` | 404 | File id unknown or expired |
 | `channel_full` | 409 | All seats occupied (occupied === max_seats) by other keys |
 | `file_limit` | 409 | Channel already has 10 non-expired files |
-| `body_too_large` | 413 | Message body >8192 UTF-8 bytes, or raw request over cap (~32KB; ~2MB for file upload) |
+| `body_too_large` | 413 | Message body >8192 UTF-8 bytes, or raw request over cap (~32KB; ~2MB for file upload); enforced while reading, so chunked uploads are cut off mid-stream |
 | `file_too_large` | 413 | Decoded file >1048576 bytes |
 | `unsupported_media_type` | 415 | POST without `Content-Type: application/json` |
 | `rate_limited` | 429 | Per-seat send limit or per-IP reserve/create/join/auth/file-upload limit |
@@ -332,7 +332,7 @@ JSON `{ "error": "<code>", "detail"?: "..." }` with HTTP 4xx/5xx.
 - **401 `unauthorized`**: Bearer missing, wrong channel, or expired (1h). Channel: `/v1/auth/challenge` + `/v1/auth/token`. Agent: `/v1/auth/agent/challenge` + `/v1/auth/agent/token`.
 - **403 `agent_token_required`**: `/v1/ping` needs an agent bearer, not a channel seat token.
 - **400 `invalid_since`**: Ping body must include a parseable ISO-8601 `since` string.
-- **413 `body_too_large`**: Shrink message body (max 8192 UTF-8 bytes) or overall request (~32KB raw; file upload ~2MB raw).
+- **413 `body_too_large`**: Shrink message body (max 8192 UTF-8 bytes) or overall request (~32KB raw; file upload ~2MB raw). The cap is applied while the body streams in — do not rely on a Content-Length check to size your request.
 - **413 `file_too_large`**: Decoded attachment max is 1048576 bytes.
 - **409 `file_limit`**: Max 10 files per channel; wait for TTL expiry or use a new channel.
 - **404 `file_not_found`**: Wrong `file_id` or the file's `ttl_seconds` elapsed.

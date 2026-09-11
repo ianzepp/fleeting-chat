@@ -1043,39 +1043,104 @@ function rejectIfNotJson(c: {
   return null;
 }
 
+type RawBody =
+  | { ok: true; text: string }
+  | { ok: false; reason: "too_large" | "read_failed" };
+
+/**
+ * Read the request body, refusing to buffer past `maxRawBytes`.
+ *
+ * A chunked request carries no Content-Length, so the cap cannot be a header
+ * check: the bytes are counted while streaming and the rest of the body is
+ * abandoned the moment the cap is crossed.
+ */
+async function readCappedBody(req: Request, maxRawBytes: number): Promise<RawBody> {
+  if (!req.body) return { ok: true, text: "" };
+  const reader = req.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > maxRawBytes) {
+        await reader.cancel();
+        return { ok: false, reason: "too_large" };
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    return { ok: false, reason: "read_failed" };
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+}
+
+type BodyRead<T> = { ok: true; body: T } | { ok: false; response: Response };
+
+async function readBodyText<T>(
+  c: {
+    req: { header: (n: string) => string | undefined; raw: Request };
+    json: (b: unknown, s?: number) => Response;
+    header: (k: string, v: string) => void;
+  },
+  maxRawBytes: number
+): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
+  const declared = c.req.header("content-length");
+  if (declared) {
+    const n = parseInt(declared, 10);
+    if (!Number.isNaN(n) && n > maxRawBytes) {
+      return {
+        ok: false,
+        response: jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`),
+      };
+    }
+  }
+  const raw = await readCappedBody(c.req.raw, maxRawBytes);
+  if (raw.ok) return { ok: true, text: raw.text };
+  return {
+    ok: false,
+    response:
+      raw.reason === "too_large"
+        ? jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`)
+        : jsonError(c, 400, "invalid_json"),
+  };
+}
+
+/** Require a parseable JSON body. */
 async function readJsonBody<T>(
   c: {
-    req: {
-      header: (n: string) => string | undefined;
-      text: () => Promise<string>;
-      raw: Request;
-    };
+    req: { header: (n: string) => string | undefined; raw: Request };
     json: (b: unknown, s?: number) => Response;
     header: (k: string, v: string) => void;
   },
   maxRawBytes = RAW_BODY_MAX_BYTES
-): Promise<{ ok: true; body: T } | { ok: false; response: Response }> {
-  const cl = c.req.header("content-length");
-  if (cl) {
-    const n = parseInt(cl, 10);
-    if (!Number.isNaN(n) && n > maxRawBytes) {
-      return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`) };
-    }
-  }
-  let raw: string;
+): Promise<BodyRead<T>> {
+  const read = await readBodyText<T>(c, maxRawBytes);
+  if (!read.ok) return read;
+  if (!read.text.trim()) return { ok: false, response: jsonError(c, 400, "invalid_json") };
   try {
-    raw = await c.req.text();
+    return { ok: true, body: JSON.parse(read.text) as T };
   } catch {
     return { ok: false, response: jsonError(c, 400, "invalid_json") };
   }
-  if (Buffer.byteLength(raw, "utf8") > maxRawBytes) {
-    return { ok: false, response: jsonError(c, 413, "body_too_large", `max ${maxRawBytes} raw bytes`) };
-  }
-  if (!raw.trim()) {
-    return { ok: false, response: jsonError(c, 400, "invalid_json") };
-  }
+}
+
+/** JSON body where an absent body means "use defaults". */
+async function readOptionalJsonBody<T>(
+  c: {
+    req: { header: (n: string) => string | undefined; raw: Request };
+    json: (b: unknown, s?: number) => Response;
+    header: (k: string, v: string) => void;
+  },
+  maxRawBytes = RAW_BODY_MAX_BYTES
+): Promise<{ ok: true; body: T | null } | { ok: false; response: Response }> {
+  const read = await readBodyText<T>(c, maxRawBytes);
+  if (!read.ok) return read;
+  if (!read.text.trim()) return { ok: true, body: null };
   try {
-    return { ok: true, body: JSON.parse(raw) as T };
+    return { ok: true, body: JSON.parse(read.text) as T };
   } catch {
     return { ok: false, response: jsonError(c, 400, "invalid_json") };
   }
@@ -1421,30 +1486,13 @@ export function createApp(): Hono {
     if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
     // Body optional: empty → defaults; otherwise JSON with optional max_seats / ttl / encrypted
-    let body: { max_seats?: unknown; ttl_seconds?: unknown; encrypted?: unknown } = {};
-    const cl = c.req.header("content-length");
-    if (cl) {
-      const n = parseInt(cl, 10);
-      if (!Number.isNaN(n) && n > RAW_BODY_MAX_BYTES) {
-        return jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`);
-      }
-    }
-    let raw: string;
-    try {
-      raw = await c.req.text();
-    } catch {
-      return jsonError(c, 400, "invalid_json");
-    }
-    if (Buffer.byteLength(raw, "utf8") > RAW_BODY_MAX_BYTES) {
-      return jsonError(c, 413, "body_too_large", `max ${RAW_BODY_MAX_BYTES} raw bytes`);
-    }
-    if (raw.trim()) {
-      try {
-        body = JSON.parse(raw) as { max_seats?: unknown; ttl_seconds?: unknown; encrypted?: unknown };
-      } catch {
-        return jsonError(c, 400, "invalid_json");
-      }
-    }
+    const parsed = await readOptionalJsonBody<{
+      max_seats?: unknown;
+      ttl_seconds?: unknown;
+      encrypted?: unknown;
+    }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body ?? {};
 
     const maxParsed = parseMaxSeats(body.max_seats);
     if (!maxParsed.ok) return jsonError(c, 400, "invalid_max_seats");
