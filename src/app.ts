@@ -122,6 +122,10 @@ ${PAPER_TOKENS}
     body {
       display: grid;
       grid-template-rows: var(--title-h) 1fr var(--status-h);
+      /* Both this column and main's must be allowed to shrink below their
+         content's min-content width, or the card is sized by its widest
+         unbreakable row and runs off the side of a narrow screen. */
+      grid-template-columns: minmax(0, 1fr);
       height: 100dvh;
       max-height: 100dvh;
     }
@@ -170,13 +174,17 @@ ${PAPER_TOKENS}
     }
     main {
       min-height: 0;
+      min-width: 0;
       display: grid;
-      place-items: center;
+      grid-template-columns: minmax(0, 1fr);
+      justify-items: center;
+      align-items: center;
       padding: 0.75rem 1.25rem;
       overflow: auto;
     }
     .stage {
       width: min(34rem, 100%);
+      min-width: 0;
       background: var(--card);
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -421,6 +429,27 @@ ${PAPER_TOKENS}
       .stage { padding: 1.5rem 1.25rem; }
       li.step { grid-template-columns: 1.6rem 1fr; column-gap: 0.75rem; }
       li.step::after { left: 0.8rem; }
+      .ticks { font-size: 0.64rem; }
+      /* Better absent than truncated to "AGENT RE…". */
+      .brand .tag { display: none; }
+      .hook { font-size: 1.45rem; }
+    }
+    /* The locked, unscrollable shell is a desktop conceit. On a phone — or any
+       window too short for the card — let the page scroll like a normal page. */
+    @media (max-width: 40rem), (max-height: 46rem) {
+      html, body { height: auto; overflow: visible; }
+      body {
+        height: auto;
+        min-height: 100dvh;
+        max-height: none;
+        grid-template-rows: var(--title-h) 1fr var(--status-h);
+      }
+      main {
+        overflow: visible;
+        align-items: start;
+        padding: 0.5rem 1.25rem 1.5rem;
+      }
+      .stage { margin: 0; }
     }
   </style>
 </head>
