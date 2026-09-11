@@ -9,6 +9,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createApp } from "../src/app.js";
+import { resolveBearer } from "../src/auth.js";
 import {
   IP_RATE_LIMIT_PER_MIN,
   MAX_TOTAL_WAITERS,
@@ -23,6 +24,7 @@ import {
   html,
   joinWithProof,
   json,
+  mintAgentTokenViaApi,
   mintSeatTokenViaSignature,
   postJson,
   signChallenge,
@@ -590,5 +592,50 @@ describe("request body limits (BH-BODY-001)", () => {
     );
     assert.equal(res.status, 200);
     assert.equal(res.body.max_seats, 3);
+  });
+});
+
+describe("request-path cost and expiry (BH-DOS-003)", () => {
+  beforeEach(() => freshStore());
+
+  it("throttles /v1/ping per client", async () => {
+    const app = createApp();
+    const agent = ed25519PemPair();
+    const agentToken = await mintAgentTokenViaApi(app, agent);
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+
+    const codes: Record<number, number> = {};
+    for (let i = 0; i < IP_RATE_LIMIT_PER_MIN + 5; i++) {
+      const res = await json(app, "/v1/ping", postJson({ since }, bearer(agentToken)));
+      codes[res.status] = (codes[res.status] ?? 0) + 1;
+    }
+    assert.ok(codes[429] >= 1, `ping flood was not throttled: ${JSON.stringify(codes)}`);
+  });
+
+  it("expires channels and bearers lazily, without a request-time sweep", async () => {
+    const app = createApp();
+
+    const channelOwner = ed25519PemPair();
+    const created = await json(app, "/v1/channels", postJson({ public_key_pem: channelOwner.publicPem }));
+    const expiredChannel = created.body.channel_id as string;
+    const channel = store.channels.get(expiredChannel)!;
+    channel.absoluteExpiresAt = Date.now() - 1;
+    channel.idleExpiresAt = Date.now() - 1;
+
+    const polled = await json(app, `/v1/channels/${expiredChannel}/messages`, {
+      headers: bearer(created.body.token),
+    });
+    assert.equal(polled.status, 404);
+    assert.equal(store.channels.has(expiredChannel), false, "expired channel kept on access");
+
+    const bearerOwner = ed25519PemPair();
+    const second = await json(app, "/v1/channels", postJson({ public_key_pem: bearerOwner.publicPem }));
+    const staleToken = second.body.token as string;
+    resolveBearer(`Bearer ${staleToken}`)!.expiresAt = Date.now() - 1;
+
+    const stale = await json(app, `/v1/channels/${second.body.channel_id}/messages`, {
+      headers: bearer(staleToken),
+    });
+    assert.equal(stale.status, 401);
   });
 });

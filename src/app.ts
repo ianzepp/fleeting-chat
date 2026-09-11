@@ -1337,6 +1337,10 @@ function parseTtlSeconds(raw: unknown): { ok: true; value: number } | { ok: fals
 export function createApp(): Hono {
   const app = new Hono();
 
+  // Expiry is handled lazily (getChannel and the bearer resolvers drop what they
+  // touch) plus the periodic sweep in index.ts. Sweeping the whole store on every
+  // request made anonymous traffic cost O(store), so it is deliberately absent here.
+
   // Global security headers on all responses; API JSON also gets no-store via helpers.
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -1479,7 +1483,6 @@ export function createApp(): Hono {
 
   // Reserve empty channel (no seats); humans / Generate page
   app.post("/v1/channels/reserve", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1543,7 +1546,6 @@ export function createApp(): Hono {
 
   // Create channel → reserve+bind seat "1" (shortcut)
   app.post("/v1/channels", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1630,7 +1632,6 @@ export function createApp(): Hono {
 
   // Join channel → next free seat ("2", "3", …) or remint existing seat
   app.post("/v1/channels/:id/join", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1715,7 +1716,6 @@ export function createApp(): Hono {
 
   // Auth challenge
   app.post("/v1/auth/challenge", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1748,7 +1748,6 @@ export function createApp(): Hono {
 
   // Auth token (refresh)
   app.post("/v1/auth/token", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1797,7 +1796,6 @@ export function createApp(): Hono {
 
   // Agent auth challenge (pubkey-scoped, no channel)
   app.post("/v1/auth/agent/challenge", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1820,7 +1818,6 @@ export function createApp(): Hono {
 
   // Agent auth token (pubkey-scoped bearer)
   app.post("/v1/auth/agent/token", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -1862,9 +1859,10 @@ export function createApp(): Hono {
 
   // Agent ping: channels with this pubkey that have new content since `since`
   app.post("/v1/ping", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
+    const ip = clientIp(c);
+    if (!store.checkIpRate(ip)) return jsonError(c, 429, "rate_limited");
 
     const agentTok = resolveAgentBearer(c.req.header("Authorization"));
     if (!agentTok) {
@@ -1928,7 +1926,6 @@ export function createApp(): Hono {
 
   // Send message
   app.post("/v1/channels/:id/messages", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
 
@@ -1961,7 +1958,6 @@ export function createApp(): Hono {
 
   // Poll messages (optional long-poll)
   app.get("/v1/channels/:id/messages", async (c) => {
-    store.sweep();
     const idRaw = c.req.param("id");
     const id = normalizeChannelId(idRaw);
     if (!id) return jsonError(c, 400, "invalid_channel_id");
@@ -2038,7 +2034,6 @@ export function createApp(): Hono {
 
   // Upload file (email-style base64 on the wire; store decoded bytes)
   app.post("/v1/channels/:id/files", async (c) => {
-    store.sweep();
     const badCt = rejectIfNotJson(c);
     if (badCt) return badCt;
     const ip = clientIp(c);
@@ -2113,7 +2108,6 @@ export function createApp(): Hono {
 
   // Download file as JSON (base64 on the wire)
   app.get("/v1/channels/:id/files/:file_id", async (c) => {
-    store.sweep();
     const idRaw = c.req.param("id");
     const id = normalizeChannelId(idRaw);
     if (!id) return jsonError(c, 400, "invalid_channel_id");
