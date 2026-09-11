@@ -87,10 +87,17 @@ export interface Channel {
 export type Waiter = Channel["waiters"][number];
 
 export interface TokenRecord {
-  token: string;
+  /** SHA-256 digest of the bearer (see tokenDigest in crypto-at-rest.ts); the
+   *  bearer itself is returned to the caller and never stored. */
+  tokenHash: string;
   channelId: string;
   seat: Seat;
   expiresAt: number;
+}
+
+/** A freshly minted seat bearer: `token` is the only copy of the secret. */
+export interface MintedToken extends TokenRecord {
+  token: string;
 }
 
 export interface ChallengeRecord {
@@ -102,9 +109,15 @@ export interface ChallengeRecord {
 
 /** Pubkey-scoped bearer (not bound to a channel/seat). */
 export interface AgentTokenRecord {
-  token: string;
+  /** SHA-256 digest of the bearer; see TokenRecord.tokenHash. */
+  tokenHash: string;
   publicKeyPem: string;
   expiresAt: number;
+}
+
+/** A freshly minted agent bearer. */
+export interface MintedAgentToken extends AgentTokenRecord {
+  token: string;
 }
 
 /** Challenge for agent (pubkey-scoped) auth — no channel. */

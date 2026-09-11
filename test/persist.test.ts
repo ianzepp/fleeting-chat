@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   rmSync,
   readFileSync,
+  statSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
@@ -13,7 +14,13 @@ import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store } from "../src/store.js";
 import { flushSync, loadStore, resolveDataDir } from "../src/persist.js";
-import { decryptUtf8, getEncryptionKey } from "../src/crypto-at-rest.js";
+import {
+  decryptUtf8,
+  getEncryptionKey,
+  migrateStoredToken,
+  tokenDigest,
+} from "../src/crypto-at-rest.js";
+import { resolveAgentBearer, resolveBearer } from "../src/auth.js";
 import { ed25519PemPair, freshStore, json } from "./support.js";
 
 describe("SQLite persistence", () => {
@@ -155,7 +162,7 @@ describe("SQLite persistence", () => {
     assert.ok(ch!.files.has(fileId));
     assert.equal(ch!.files.get(fileId)!.bytes.toString("utf8"), "hello-file");
     assert.ok(store.usedChannelIds.has(channelId));
-    assert.ok(store.tokens.has(tokenA));
+    assert.equal(resolveBearer(`Bearer ${tokenA}`)?.channelId, channelId);
 
     const app2 = createApp();
     const poll = await json(app2, `/v1/channels/${channelId}/messages?after=0`, {
@@ -263,7 +270,7 @@ describe("SQLite persistence", () => {
 
     const ch = store.channels.get(channelId)!;
     ch.idleExpiresAt = Date.now() - 1;
-    const tok = store.tokens.get(tokenA)!;
+    const tok = resolveBearer(`Bearer ${tokenA}`)!;
     tok.expiresAt = Date.now() - 1;
 
     flushSync(store);
@@ -271,7 +278,7 @@ describe("SQLite persistence", () => {
     await loadStore(store);
 
     assert.equal(store.channels.has(channelId), false);
-    assert.equal(store.tokens.has(tokenA), false);
+    assert.equal(resolveBearer(`Bearer ${tokenA}`), null);
     assert.ok(store.usedChannelIds.has(channelId));
   });
 
@@ -302,7 +309,7 @@ describe("SQLite persistence", () => {
     freshStore();
     await loadStore(store);
 
-    assert.ok(store.agentTokens.has(agentToken));
+    assert.ok(resolveAgentBearer(`Bearer ${agentToken}`));
     assert.equal(store.agentChallenges.has(challenge), false); // consumed
   });
 
@@ -381,7 +388,8 @@ describe("SQLite persistence", () => {
     assert.equal(ch!.messages[0].from, "1");
     assert.equal(ch!.messages[0].body, "hi");
     assert.equal(ch!.files.get("f1")!.seat, "1");
-    assert.equal(store.tokens.get("tok-legacy")!.seat, "1");
+    // The legacy JSON row holds the bearer itself; loading must still accept it.
+    assert.equal(resolveBearer("Bearer tok-legacy")?.seat, "1");
     assert.ok(existsSync(join(dataDir, "fleeting.sqlite")));
     assert.equal(existsSync(jsonPath), false, "legacy plaintext JSON must not survive migration");
     assert.equal(
@@ -446,6 +454,31 @@ describe("SQLite persistence", () => {
     await loadStore(store);
 
     assert.equal(existsSync(jsonPath), false, "superseded store.json was kept on the volume");
+  });
+
+  it("stores a token digest instead of the bearer", async () => {
+    const app = createApp();
+    const a = ed25519PemPair();
+    const create = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const tokenA = create.body.token as string;
+    flushSync(store);
+
+    const file = join(dataDir, "fleeting.sqlite");
+    const raw = readFileSync(file);
+    assert.equal(raw.includes(tokenA), false, "the live bearer reached disk");
+    assert.ok(raw.includes("sha256:"), "no token digest was stored");
+
+    const mode = statSync(file).mode & 0o777;
+    assert.equal(mode, 0o600, `store file mode ${mode.toString(8)}`);
+  });
+
+  it("digests a legacy plaintext token row rather than dropping the session", () => {
+    assert.equal(migrateStoredToken("legacy-bearer"), tokenDigest("legacy-bearer"));
+    assert.equal(migrateStoredToken(tokenDigest("already")), tokenDigest("already"));
   });
 
   it("crypto helpers roundtrip with STORE_ENCRYPTION_KEY", async () => {

@@ -31,10 +31,10 @@ import {
   encryptBytes,
   encryptUtf8,
   getEncryptionKey,
+  migrateStoredToken,
 } from "./crypto-at-rest.js";
 import type {
   AgentChallengeRecord,
-  AgentTokenRecord,
   Channel,
   ChannelFile,
   ChallengeRecord,
@@ -42,7 +42,6 @@ import type {
   Seat,
   SeatState,
   Store,
-  TokenRecord,
 } from "./store.js";
 
 const SAVE_DEBOUNCE_MS = 300;
@@ -93,14 +92,37 @@ interface PersistedChannel {
   files: Record<string, PersistedFile>;
 }
 
+/** Token rows as stored: `tokenHash` from current releases, `token` from volumes
+ *  written before tokens were digested. */
+interface PersistedToken {
+  tokenHash?: string;
+  token?: string;
+  channelId: string;
+  seat: string;
+  expiresAt: number;
+}
+
+interface PersistedAgentToken {
+  tokenHash?: string;
+  token?: string;
+  publicKeyPem: string;
+  expiresAt: number;
+}
+
 interface PersistedStore {
   version: 1;
   channels: PersistedChannel[];
-  tokens: TokenRecord[];
+  tokens: PersistedToken[];
   challenges: ChallengeRecord[];
-  agentTokens: AgentTokenRecord[];
+  agentTokens: PersistedAgentToken[];
   agentChallenges: AgentChallengeRecord[];
   usedChannelIds: string[];
+}
+
+/** Digest to key a stored token row by, or null when it carries neither form. */
+function storedTokenDigest(rec: { tokenHash?: string; token?: string }): string | null {
+  const stored = rec.tokenHash ?? rec.token;
+  return stored ? migrateStoredToken(stored) : null;
 }
 
 /** Legacy letter seats (pre numeric seats). Map once on load: A→"1" … H→"8". */
@@ -176,6 +198,7 @@ function createSchema(db: Database): void {
       FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS tokens (
+      -- SHA-256 digest of the bearer, never the bearer itself.
       token TEXT PRIMARY KEY,
       channel_id TEXT NOT NULL,
       seat TEXT NOT NULL,
@@ -188,6 +211,7 @@ function createSchema(db: Database): void {
       expires_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS agent_tokens (
+      -- SHA-256 digest of the bearer, never the bearer itself.
       token TEXT PRIMARY KEY,
       public_key_pem TEXT NOT NULL,
       expires_at INTEGER NOT NULL
@@ -288,7 +312,7 @@ function writeStoreSync(store: Store, dataDir: string): void {
       `INSERT INTO tokens (token, channel_id, seat, expires_at) VALUES (?, ?, ?, ?)`
     );
     for (const rec of store.tokens.values()) {
-      insTok.run([rec.token, rec.channelId, rec.seat, rec.expiresAt]);
+      insTok.run([rec.tokenHash, rec.channelId, rec.seat, rec.expiresAt]);
     }
     insTok.free();
 
@@ -310,7 +334,7 @@ function writeStoreSync(store: Store, dataDir: string): void {
       `INSERT INTO agent_tokens (token, public_key_pem, expires_at) VALUES (?, ?, ?)`
     );
     for (const rec of store.agentTokens.values()) {
-      insATok.run([rec.token, rec.publicKeyPem, rec.expiresAt]);
+      insATok.run([rec.tokenHash, rec.publicKeyPem, rec.expiresAt]);
     }
     insATok.free();
 
@@ -337,7 +361,8 @@ function writeStoreSync(store: Store, dataDir: string): void {
       `${SQLITE_NAME}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
     );
     const exported = Buffer.from(db.export());
-    writeFileSync(tmp, exported);
+    // Owner-only: the file holds channel metadata, message ciphertext, and token digests.
+    writeFileSync(tmp, exported, { mode: 0o600 });
     renameSync(tmp, file);
   } finally {
     db.close();
@@ -431,7 +456,14 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
 
   for (const rec of data.tokens ?? []) {
     if (now >= rec.expiresAt) continue;
-    store.tokens.set(rec.token, { ...rec, seat: migrateSeatId(rec.seat) });
+    const tokenHash = storedTokenDigest(rec);
+    if (!tokenHash) continue;
+    store.tokens.set(tokenHash, {
+      tokenHash,
+      channelId: rec.channelId,
+      seat: migrateSeatId(rec.seat),
+      expiresAt: rec.expiresAt,
+    });
   }
   for (const rec of data.challenges ?? []) {
     if (now >= rec.expiresAt) continue;
@@ -439,7 +471,13 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
   }
   for (const rec of data.agentTokens ?? []) {
     if (now >= rec.expiresAt) continue;
-    store.agentTokens.set(rec.token, rec);
+    const tokenHash = storedTokenDigest(rec);
+    if (!tokenHash) continue;
+    store.agentTokens.set(tokenHash, {
+      tokenHash,
+      publicKeyPem: rec.publicKeyPem,
+      expiresAt: rec.expiresAt,
+    });
   }
   for (const rec of data.agentChallenges ?? []) {
     if (now >= rec.expiresAt) continue;
@@ -576,7 +614,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
     if (tokRows[0]) {
       for (const row of tokRows[0].values) {
         data.tokens.push({
-          token: row[0] as string,
+          tokenHash: row[0] as string,
           channelId: row[1] as string,
           seat: row[2] as Seat,
           expiresAt: row[3] as number,
@@ -604,7 +642,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
     if (aTokRows[0]) {
       for (const row of aTokRows[0].values) {
         data.agentTokens.push({
-          token: row[0] as string,
+          tokenHash: row[0] as string,
           publicKeyPem: row[1] as string,
           expiresAt: row[2] as number,
         });

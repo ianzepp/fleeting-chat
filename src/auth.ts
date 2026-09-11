@@ -1,11 +1,14 @@
 import { createPublicKey, verify, randomBytes, timingSafeEqual } from "node:crypto";
+import { tokenDigest } from "./crypto-at-rest.js";
 import {
   store,
   TOKEN_TTL_MS,
   CHALLENGE_TTL_MS,
   type Seat,
   type TokenRecord,
+  type MintedToken,
   type AgentTokenRecord,
+  type MintedAgentToken,
 } from "./store.js";
 
 /** Normalize PEM: trim and ensure trailing newline. */
@@ -45,17 +48,17 @@ export function verifyEd25519Signature(
   }
 }
 
-export function mintToken(channelId: string, seat: Seat, now = Date.now()): TokenRecord {
+export function mintToken(channelId: string, seat: Seat, now = Date.now()): MintedToken {
   const token = randomBytes(32).toString("base64url");
   const rec: TokenRecord = {
-    token,
+    tokenHash: tokenDigest(token),
     channelId,
     seat,
     expiresAt: now + TOKEN_TTL_MS,
   };
-  store.tokens.set(token, rec);
+  store.tokens.set(rec.tokenHash, rec);
   store.markDirty();
-  return rec;
+  return { ...rec, token };
 }
 
 /**
@@ -111,33 +114,35 @@ export function consumeChallenge(
 }
 
 /**
- * Resolve Bearer token via Map lookup (O(1); no string equality scan).
- * Expired tokens are deleted. Callers compare channelId with === (public id).
+ * Resolve Bearer token via Map lookup (O(1); no string equality scan) on the
+ * token's digest. Expired tokens are deleted. Callers compare channelId with ===
+ * (public id).
  */
 export function resolveBearer(authHeader: string | undefined): TokenRecord | null {
   if (!authHeader) return null;
   const m = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
   if (!m) return null;
-  const rec = store.tokens.get(m[1]);
+  const key = tokenDigest(m[1]);
+  const rec = store.tokens.get(key);
   if (!rec) return null;
   if (Date.now() >= rec.expiresAt) {
-    store.tokens.delete(m[1]);
+    store.tokens.delete(key);
     store.markDirty();
     return null;
   }
   return rec;
 }
 
-export function mintAgentToken(publicKeyPem: string, now = Date.now()): AgentTokenRecord {
+export function mintAgentToken(publicKeyPem: string, now = Date.now()): MintedAgentToken {
   const token = randomBytes(32).toString("base64url");
   const rec: AgentTokenRecord = {
-    token,
+    tokenHash: tokenDigest(token),
     publicKeyPem: normalizePem(publicKeyPem),
     expiresAt: now + TOKEN_TTL_MS,
   };
-  store.agentTokens.set(token, rec);
+  store.agentTokens.set(rec.tokenHash, rec);
   store.markDirty();
-  return rec;
+  return { ...rec, token };
 }
 
 export function createAgentChallenge(
@@ -170,17 +175,18 @@ export function consumeAgentChallenge(challenge: string, publicKeyPem: string): 
 }
 
 /**
- * Resolve Bearer as an agent (pubkey-scoped) token.
+ * Resolve Bearer as an agent (pubkey-scoped) token, by digest.
  * Channel tokens are not returned here.
  */
 export function resolveAgentBearer(authHeader: string | undefined): AgentTokenRecord | null {
   if (!authHeader) return null;
   const m = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
   if (!m) return null;
-  const rec = store.agentTokens.get(m[1]);
+  const key = tokenDigest(m[1]);
+  const rec = store.agentTokens.get(key);
   if (!rec) return null;
   if (Date.now() >= rec.expiresAt) {
-    store.agentTokens.delete(m[1]);
+    store.agentTokens.delete(key);
     store.markDirty();
     return null;
   }

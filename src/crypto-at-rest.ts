@@ -1,4 +1,7 @@
-/** At-rest AES-256-GCM for channel message bodies and file bytes (server-side).
+/** At-rest protection for stored material (server-side).
+ *
+ * Message bodies and file bytes: optional AES-256-GCM, keyed by STORE_ENCRYPTION_KEY.
+ * Bearer tokens: SHA-256 digests, so the database never holds a usable credential.
  *
  * Not end-to-end: the process decrypts into the in-memory Store and serves plaintext
  * to authenticated clients. Opt out per channel with `encrypted: false`.
@@ -11,12 +14,28 @@
  * Master key: env STORE_ENCRYPTION_KEY = standard base64 encoding of exactly 32 bytes.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const PREFIX = "v1:";
 const NONCE_LEN = 12;
 const TAG_LEN = 16;
 const KEY_LEN = 32;
+
+/** Marks a stored token as a digest rather than a legacy plaintext bearer. */
+const TOKEN_HASH_PREFIX = "sha256:";
+
+/** At-rest key for a bearer token. Tokens carry 256 bits of entropy, so a plain
+ *  SHA-256 is enough: a stolen database yields no usable credential and no
+ *  feasible preimage. */
+export function tokenDigest(token: string): string {
+  return TOKEN_HASH_PREFIX + createHash("sha256").update(token).digest("base64url");
+}
+
+/** Digest for a stored token row. Rows written before token hashing hold the
+ *  bearer itself; hashing them on load keeps those sessions working. */
+export function migrateStoredToken(stored: string): string {
+  return stored.startsWith(TOKEN_HASH_PREFIX) ? stored : tokenDigest(stored);
+}
 
 /** Parse STORE_ENCRYPTION_KEY; null if missing/invalid (not exactly 32 decoded bytes). */
 export function getEncryptionKey(): Buffer | null {
