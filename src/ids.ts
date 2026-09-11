@@ -9,7 +9,7 @@ export function generateChannelId(maxAttempts = 64): string {
     const c = randomInt(0, 1000).toString().padStart(3, "0");
     const id = `${a}-${b}-${c}`;
     if (!store.usedChannelIds.has(id) && !store.channels.has(id)) {
-      store.usedChannelIds.add(id);
+      store.rememberChannelId(id);
       store.markDirty();
       return id;
     }

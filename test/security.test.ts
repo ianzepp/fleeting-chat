@@ -12,7 +12,9 @@ import { createApp } from "../src/app.js";
 import { resolveBearer } from "../src/auth.js";
 import {
   IP_RATE_LIMIT_PER_MIN,
+  MAX_TTL_SECONDS,
   MAX_TOTAL_WAITERS,
+  MAX_USED_CHANNEL_IDS,
   MAX_WAITERS_PER_CHANNEL,
   RAW_BODY_MAX_BYTES,
   store,
@@ -644,5 +646,39 @@ describe("request-path cost and expiry (BH-DOS-003)", () => {
       headers: bearer(staleToken),
     });
     assert.equal(stale.status, 401);
+  });
+});
+
+describe("channel id memory (BH-DOS-001)", () => {
+  beforeEach(() => freshStore());
+
+  it("evicts the oldest ids past the cap", () => {
+    const now = Date.now();
+    for (let i = 0; i < MAX_USED_CHANNEL_IDS + 10; i++) {
+      store.rememberChannelId(`id-${i}`, now);
+    }
+    assert.equal(store.usedChannelIds.size, MAX_USED_CHANNEL_IDS);
+    assert.equal(store.usedChannelIds.has("id-0"), false, "oldest id was not evicted");
+    assert.equal(store.usedChannelIds.has(`id-${MAX_USED_CHANNEL_IDS + 9}`), true);
+  });
+
+  it("forgets ids older than the longest channel lifetime", () => {
+    const now = Date.now();
+    store.rememberChannelId("stale", now - MAX_TTL_SECONDS * 1000 - 1000);
+    store.rememberChannelId("fresh", now);
+    store.pruneChannelIds(now);
+    assert.equal(store.usedChannelIds.has("stale"), false);
+    assert.equal(store.usedChannelIds.has("fresh"), true);
+  });
+
+  it("still issues ids after eviction", async () => {
+    const app = createApp();
+    for (let i = 0; i < MAX_USED_CHANNEL_IDS; i++) {
+      store.rememberChannelId(`filler-${i}`);
+    }
+    const res = await json(app, "/v1/channels/reserve", postJson({ encrypted: false }));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.match(res.body.channel_id, /^\d{3}-\d{3}-\d{3}$/);
+    assert.equal(store.usedChannelIds.size, MAX_USED_CHANNEL_IDS);
   });
 });

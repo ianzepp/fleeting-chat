@@ -351,7 +351,7 @@ function writeStoreSync(store: Store, dataDir: string): void {
     insAChal.free();
 
     const insUsed = db.prepare(`INSERT INTO used_channel_ids (id) VALUES (?)`);
-    for (const id of store.usedChannelIds) {
+    for (const id of store.usedChannelIds.keys()) {
       insUsed.run([id]);
     }
     insUsed.free();
@@ -409,7 +409,9 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
   store.usedChannelIds.clear();
 
   for (const id of data.usedChannelIds ?? []) {
-    store.usedChannelIds.add(id);
+    // Issue times are not stored; treating loaded ids as current is the
+    // conservative choice, and the count cap still bounds the set.
+    store.rememberChannelId(id, now);
   }
 
   const key = getEncryptionKey();

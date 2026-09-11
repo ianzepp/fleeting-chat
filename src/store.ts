@@ -137,6 +137,11 @@ export const IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Caller-chosen channel lifetime bounds: 1 hour .. 30 days. */
 export const MIN_TTL_SECONDS = 3600;
 export const MAX_TTL_SECONDS = 2_592_000;
+/** Channel ids are remembered so a code is never reissued, which cannot be
+ *  unbounded: ids are forgotten after the longest lifetime a channel can have,
+ *  and the oldest are evicted past this count so a creation flood cannot grow
+ *  the set without limit. Live channels are excluded by `channels` itself. */
+export const MAX_USED_CHANNEL_IDS = 100_000;
 export const TOKEN_TTL_MS = 60 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const NICK_MAX_BYTES = 64;
@@ -185,7 +190,8 @@ export class Store {
   challenges = new Map<string, ChallengeRecord>();
   agentTokens = new Map<string, AgentTokenRecord>();
   agentChallenges = new Map<string, AgentChallengeRecord>();
-  usedChannelIds = new Set<string>();
+  /** Channel id → when it was issued, so the window can expire. */
+  usedChannelIds = new Map<string, number>();
   /** create + join + auth + file upload requests per IP */
   ipRate = new Map<string, IpRateWindow>();
   /** Live long polls across every channel. Only the waiter helpers below write
@@ -206,6 +212,26 @@ export class Store {
     }
     this.sweepChannelFiles(ch);
     return ch;
+  }
+
+  /** Record a freshly issued channel id, evicting the oldest past the cap. */
+  rememberChannelId(id: string, now = Date.now()): void {
+    this.usedChannelIds.set(id, now);
+    let excess = this.usedChannelIds.size - MAX_USED_CHANNEL_IDS;
+    if (excess <= 0) return;
+    for (const oldest of this.usedChannelIds.keys()) {
+      if (excess <= 0) break;
+      this.usedChannelIds.delete(oldest);
+      excess -= 1;
+    }
+  }
+
+  /** Forget ids older than any channel could still be alive. */
+  pruneChannelIds(now = Date.now()): void {
+    const cutoff = now - MAX_TTL_SECONDS * 1000;
+    for (const [id, issuedAt] of this.usedChannelIds) {
+      if (issuedAt < cutoff) this.usedChannelIds.delete(id);
+    }
   }
 
   isExpired(ch: Channel, now = Date.now()): boolean {
@@ -319,6 +345,7 @@ export class Store {
     for (const [ip, win] of this.ipRate) {
       if (now - win.start >= 60_000) this.ipRate.delete(ip);
     }
+    this.pruneChannelIds(now);
     if (authChanged) this.markDirty();
   }
 }
