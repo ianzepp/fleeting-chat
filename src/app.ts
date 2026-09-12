@@ -1731,6 +1731,49 @@ export function createApp(): Hono {
     return c.json(seatPayload(seat, tok, ch.maxSeats, seatState.nick));
   });
 
+  // Extend absolute TTL (bound seat). Clamped to createdAt + 30d; idle re-armed.
+  app.post("/v1/channels/:id/extend", async (c) => {
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+
+    const parsed = await readJsonBody<{ extend_by_seconds?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    const ttlParsed = parseChannelTtlSeconds(body.extend_by_seconds);
+    if (!ttlParsed.ok || ttlParsed.ttlMs === undefined) {
+      return jsonError(c, 400, "invalid_ttl");
+    }
+    if (!checkRate(ch, tok.seat)) return jsonError(c, 429, "rate_limited");
+
+    const now = Date.now();
+    const ceiling = ch.createdAt + MAX_TTL_SECONDS * 1000;
+    if (ch.absoluteExpiresAt >= ceiling) {
+      return jsonError(c, 409, "ttl_at_maximum");
+    }
+    ch.absoluteExpiresAt = Math.min(ch.absoluteExpiresAt + ttlParsed.ttlMs, ceiling);
+    store.touchIdle(ch, now);
+    setApiSecurityHeaders(c);
+    return c.json({
+      channel_id: id,
+      max_seats: ch.maxSeats,
+      encrypted: ch.encrypted,
+      ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
+      absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
+      idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
+    });
+  });
+
   // Auth challenge
   app.post("/v1/auth/challenge", async (c) => {
     const badCt = rejectIfNotJson(c);

@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
-import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL } from "../src/store.js";
+import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL, MAX_TTL_SECONDS } from "../src/store.js";
 import { ed25519PemPair, freshStore, joinWithProof, json, mintAgentTokenViaApi } from "./support.js";
 
 describe("fleeting.chat spike", () => {
@@ -268,6 +268,247 @@ describe("fleeting.chat spike", () => {
     }
   });
 
+  it("extend +1d pushes absolute and returns reserve-shaped expiry fields", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: 3600 }),
+    });
+    assert.equal(created.status, 200);
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const ch = store.channels.get(channelId)!;
+    const prevAbsolute = ch.absoluteExpiresAt;
+    const prevIdle = ch.idleExpiresAt;
+
+    const before = Date.now();
+    const ext = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 86400 }),
+    });
+    const after = Date.now();
+    assert.equal(ext.status, 200);
+    assert.equal(ext.body.channel_id, channelId);
+    assert.equal(ext.body.max_seats, created.body.max_seats);
+    assert.equal(ext.body.encrypted, created.body.encrypted);
+    assert.equal(ch.absoluteExpiresAt, prevAbsolute + 86400_000);
+    assert.equal(Date.parse(ext.body.absolute_expires_at), ch.absoluteExpiresAt);
+    assert.equal(Date.parse(ext.body.idle_expires_at), ch.idleExpiresAt);
+    const remaining = Math.round((ch.absoluteExpiresAt - after) / 1000);
+    assert.ok(Math.abs((ext.body.ttl_seconds as number) - remaining) <= 2);
+    // Idle re-armed via touchIdle so the old idle cannot kill before the new absolute.
+    assert.ok(ch.idleExpiresAt >= prevIdle);
+    const expectedIdle = Math.min(ch.absoluteExpiresAt, after + ch.idleTtlMs);
+    assert.ok(Math.abs(ch.idleExpiresAt - expectedIdle) <= 50);
+    assert.ok(ch.idleExpiresAt <= ch.absoluteExpiresAt);
+    assert.ok(before <= ch.absoluteExpiresAt);
+  });
+
+  it("repeated extends reach the creation+30d ceiling then 409", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: 3600 }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const ch = store.channels.get(channelId)!;
+    const ceiling = ch.createdAt + MAX_TTL_SECONDS * 1000;
+    const week = 604800;
+
+    let lastStatus = 0;
+    for (let i = 0; i < 8; i++) {
+      const ext = await json(app, `/v1/channels/${channelId}/extend`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ extend_by_seconds: week }),
+      });
+      lastStatus = ext.status;
+      if (ext.status === 409) {
+        assert.equal(ext.body.error, "ttl_at_maximum");
+        break;
+      }
+      assert.equal(ext.status, 200, `extend ${i}`);
+      assert.ok(ch.absoluteExpiresAt <= ceiling);
+    }
+    assert.equal(ch.absoluteExpiresAt, ceiling);
+    assert.equal(lastStatus, 409);
+
+    const again = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, "ttl_at_maximum");
+  });
+
+  it("extend clamps when the request overshoots the creation+30d ceiling", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: 3600 }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const ch = store.channels.get(channelId)!;
+    const ceiling = ch.createdAt + MAX_TTL_SECONDS * 1000;
+    // Leave one hour of room so a +1d request must clamp, not 409.
+    ch.absoluteExpiresAt = ceiling - 3600_000;
+    ch.idleExpiresAt = Math.min(ch.absoluteExpiresAt, Date.now() + ch.idleTtlMs);
+
+    const ext = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 86400 }),
+    });
+    assert.equal(ext.status, 200);
+    assert.equal(ch.absoluteExpiresAt, ceiling);
+    assert.equal(Date.parse(ext.body.absolute_expires_at), ceiling);
+    assert.ok((ext.body.ttl_seconds as number) > 0);
+  });
+
+  it("extend at the 30d ceiling returns 409 ttl_at_maximum", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, ttl_seconds: MAX_TTL_SECONDS }),
+    });
+    assert.equal(created.status, 200);
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const beforeAbs = store.channels.get(channelId)!.absoluteExpiresAt;
+
+    const ext = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(ext.status, 409);
+    assert.equal(ext.body.error, "ttl_at_maximum");
+    assert.equal(store.channels.get(channelId)!.absoluteExpiresAt, beforeAbs);
+  });
+
+  it("extend rejects invalid extend_by_seconds with 400 invalid_ttl", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+
+    for (const bad of [undefined, null, 0, 3599, 2_592_001, 1.5, "3600", true, {}]) {
+      const body =
+        bad === undefined ? JSON.stringify({}) : JSON.stringify({ extend_by_seconds: bad });
+      const res = await json(app, `/v1/channels/${channelId}/extend`, {
+        method: "POST",
+        headers,
+        body,
+      });
+      assert.equal(res.status, 400, `extend_by_seconds=${JSON.stringify(bad)}`);
+      assert.equal(res.body.error, "invalid_ttl");
+    }
+  });
+
+  it("extend requires a channel bearer for that room", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const other = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+
+    const noAuth = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(noAuth.status, 401);
+    assert.equal(noAuth.body.error, "unauthorized");
+
+    const wrong = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${other.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.body.error, "unauthorized");
+
+    const missing = await json(app, "/v1/channels/000-000-000/extend", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(missing.status, 401);
+    assert.equal(missing.body.error, "unauthorized");
+
+    const ch = store.channels.get(channelId)!;
+    ch.absoluteExpiresAt = Date.now() - 1;
+    ch.idleExpiresAt = Date.now() - 1;
+    const expired = await json(app, `/v1/channels/${channelId}/extend`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ extend_by_seconds: 3600 }),
+    });
+    assert.equal(expired.status, 404);
+    assert.equal(expired.body.error, "channel_not_found");
+  });
+
   it("challenge / sign refresh", async () => {
     freshStore();
     const app = createApp();
@@ -486,6 +727,7 @@ describe("fleeting.chat spike", () => {
     const text = await l.text();
     assert.match(text, /fleeting\.chat/i);
     assert.match(text, /\?channel=/);
+    assert.match(text, /extend_by_seconds/);
     assert.equal(l.headers.get("access-control-allow-origin"), "*");
     const w = await app.request("/.well-known/llms.txt");
     assert.equal(w.status, 200);
