@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
-import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL, MAX_TTL_SECONDS } from "../src/store.js";
+import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL, MAX_TTL_SECONDS, MAX_MAX_SEATS } from "../src/store.js";
 import { ed25519PemPair, freshStore, joinWithProof, json, mintAgentTokenViaApi } from "./support.js";
 
 describe("fleeting.chat spike", () => {
@@ -507,6 +507,301 @@ describe("fleeting.chat spike", () => {
     });
     assert.equal(expired.status, 404);
     assert.equal(expired.body.error, "channel_not_found");
+  });
+
+
+  it("expand_by 1 on max_seats 2 → 3; new join gets seat 3", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const cKey = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.max_seats, 2);
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+    assert.equal(joinB.body.seat, "2");
+
+    const beforeIdle = store.channels.get(channelId)!.idleExpiresAt;
+    const exp = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(exp.status, 200);
+    assert.equal(exp.body.channel_id, channelId);
+    assert.equal(exp.body.max_seats, 3);
+    assert.equal(exp.body.occupied, 2);
+    assert.equal(exp.body.encrypted, created.body.encrypted);
+    assert.equal(typeof exp.body.ttl_seconds, "number");
+    assert.ok((exp.body.ttl_seconds as number) > 0);
+    assert.ok(Date.parse(exp.body.absolute_expires_at as string) > 0);
+    assert.ok(Date.parse(exp.body.idle_expires_at as string) > 0);
+    assert.equal(store.channels.get(channelId)!.maxSeats, 3);
+    assert.ok(store.channels.get(channelId)!.idleExpiresAt >= beforeIdle);
+
+    const joinC = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: cKey.publicPem }),
+    });
+    assert.equal(joinC.status, 200);
+    assert.equal(joinC.body.seat, "3");
+    assert.equal(joinC.body.max_seats, 3);
+  });
+
+  it("repeated expands reach max_seats 8 then 409 seats_at_maximum", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const ch = store.channels.get(channelId)!;
+
+    let lastStatus = 0;
+    for (let i = 0; i < 10; i++) {
+      const exp = await json(app, `/v1/channels/${channelId}/expand`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ expand_by: 1 }),
+      });
+      lastStatus = exp.status;
+      if (exp.status === 409) {
+        assert.equal(exp.body.error, "seats_at_maximum");
+        break;
+      }
+      assert.equal(exp.status, 200, `expand ${i}`);
+      assert.ok(ch.maxSeats <= MAX_MAX_SEATS);
+      assert.equal(exp.body.max_seats, ch.maxSeats);
+      assert.equal(exp.body.occupied, 1);
+    }
+    assert.equal(ch.maxSeats, MAX_MAX_SEATS);
+    assert.equal(lastStatus, 409);
+
+    const again = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, "seats_at_maximum");
+  });
+
+  it("expand clamps when the request overshoots max_seats 8", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, max_seats: 6 }),
+    });
+    assert.equal(created.status, 200);
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+
+    const exp = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 5 }),
+    });
+    assert.equal(exp.status, 200);
+    assert.equal(exp.body.max_seats, MAX_MAX_SEATS);
+    assert.equal(store.channels.get(channelId)!.maxSeats, MAX_MAX_SEATS);
+    assert.equal(exp.body.occupied, 1);
+  });
+
+  it("expand at max_seats 8 returns 409 seats_at_maximum", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, max_seats: MAX_MAX_SEATS }),
+    });
+    assert.equal(created.status, 200);
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const before = store.channels.get(channelId)!.maxSeats;
+
+    const exp = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(exp.status, 409);
+    assert.equal(exp.body.error, "seats_at_maximum");
+    assert.equal(store.channels.get(channelId)!.maxSeats, before);
+  });
+
+  it("expand rejects invalid expand_by with 400 invalid_expand_by", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+
+    for (const bad of [undefined, null, 0, -1, 1.5, "1", true, {}]) {
+      const body =
+        bad === undefined ? JSON.stringify({}) : JSON.stringify({ expand_by: bad });
+      const res = await json(app, `/v1/channels/${channelId}/expand`, {
+        method: "POST",
+        headers,
+        body,
+      });
+      assert.equal(res.status, 400, `expand_by=${JSON.stringify(bad)}`);
+      assert.equal(res.body.error, "invalid_expand_by");
+    }
+  });
+
+  it("expand requires a channel bearer for that room", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+    const other = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+
+    const noAuth = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(noAuth.status, 401);
+    assert.equal(noAuth.body.error, "unauthorized");
+
+    const wrong = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${other.body.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.body.error, "unauthorized");
+
+    const missing = await json(app, "/v1/channels/000-000-000/expand", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(missing.status, 401);
+    assert.equal(missing.body.error, "unauthorized");
+
+    const ch = store.channels.get(channelId)!;
+    ch.absoluteExpiresAt = Date.now() - 1;
+    ch.idleExpiresAt = Date.now() - 1;
+    const expired = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(expired.status, 404);
+    assert.equal(expired.body.error, "channel_not_found");
+  });
+
+  it("expand occupied field counts currently bound seats", async () => {
+    freshStore();
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: a.publicPem, max_seats: 4 }),
+    });
+    const channelId = created.body.channel_id as string;
+    const token = created.body.token as string;
+
+    const solo = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(solo.status, 200);
+    assert.equal(solo.body.occupied, 1);
+    assert.equal(solo.body.max_seats, 5);
+
+    const joinB = await json(app, `/v1/channels/${channelId}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: b.publicPem }),
+    });
+    assert.equal(joinB.status, 200);
+
+    const duo = await json(app, `/v1/channels/${channelId}/expand`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expand_by: 1 }),
+    });
+    assert.equal(duo.status, 200);
+    assert.equal(duo.body.occupied, 2);
+    assert.equal(duo.body.max_seats, 6);
   });
 
   it("challenge / sign refresh", async () => {

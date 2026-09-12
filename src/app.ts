@@ -29,6 +29,7 @@ import {
   NICK_MAX_BYTES,
   assignSeats,
   nextSeat,
+  occupiedSeatCount,
   normalizeChannelId,
   type Channel,
   type ChannelFile,
@@ -1767,6 +1768,49 @@ export function createApp(): Hono {
     return c.json({
       channel_id: id,
       max_seats: ch.maxSeats,
+      encrypted: ch.encrypted,
+      ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
+      absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
+      idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
+    });
+  });
+
+  // Expand max_seats ceiling (bound seat). Clamped to 8; does not mint seats.
+  app.post("/v1/channels/:id/expand", async (c) => {
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+
+    const idRaw = c.req.param("id");
+    const id = normalizeChannelId(idRaw);
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+
+    const parsed = await readJsonBody<{ expand_by?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    const expandBy = body.expand_by;
+    if (typeof expandBy !== "number" || !Number.isInteger(expandBy) || expandBy < 1) {
+      return jsonError(c, 400, "invalid_expand_by");
+    }
+    if (!checkRate(ch, tok.seat)) return jsonError(c, 429, "rate_limited");
+
+    if (ch.maxSeats >= MAX_MAX_SEATS) {
+      return jsonError(c, 409, "seats_at_maximum");
+    }
+    const now = Date.now();
+    ch.maxSeats = Math.min(ch.maxSeats + expandBy, MAX_MAX_SEATS);
+    store.touchIdle(ch, now);
+    setApiSecurityHeaders(c);
+    return c.json({
+      channel_id: id,
+      max_seats: ch.maxSeats,
+      occupied: occupiedSeatCount(ch),
       encrypted: ch.encrypted,
       ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
