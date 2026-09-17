@@ -54,6 +54,14 @@ Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes 
 
 The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different on the next boot, the process logs why and **exits instead of starting** — serving an empty store would overwrite the encrypted rows. There is no key rotation path: changing the key means re-encrypting the store, not just changing the variable.
 
+## Store-governed rooms
+
+Rooms remain `unrestricted` unless reserve/create explicitly requests `store-v1` revision 1. That immutable profile is enforced by the server for every HTTP client: deterministic pre-storage scanning, stable public-key-derived message identities, directional read filtering after a participant block, encrypted retained report evidence, and separately authorized moderation actions.
+
+`store-v1` creation fails closed unless both `STORE_ENCRYPTION_KEY` and a non-empty comma-separated `STORE_V1_BLOCKED_TERMS` scanner configuration exist. Governed participants must submit the advertised `store-v1.1` terms version at create/join. `REPORT_RETENTION_SECONDS` defaults to seven days and is bounded to 30 days. `MODERATION_TOKEN` controls the operator-only report-resolution and room/global-ban routes; it is never interchangeable with a participant bearer.
+
+The complete wire contract, safety advertisement, error codes, report/block endpoints, and moderation routes are in [`llms.txt`](llms.txt).
+
 ## Deploy
 
 Single Node process (`tsx src/index.ts`). `PORT` from the host. Health: `GET /healthz`.

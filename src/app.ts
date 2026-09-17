@@ -51,10 +51,21 @@ import {
   createAgentChallenge,
   consumeAgentChallenge,
   resolveAgentBearer,
+  publicKeyIdentity,
+  isPublicKeyIdentity,
+  moderatorAuthorized,
 } from "./auth.js";
 import { generateChannelId } from "./ids.js";
 import { encryptionAvailable } from "./crypto-at-rest.js";
 import { flushStore } from "./persist.js";
+import {
+  parseSafetyProfile,
+  reportRetentionMs,
+  safetyAdvertisement,
+  scannerAvailable,
+  scanStoreV1Message,
+  termsAccepted,
+} from "./safety.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -1251,6 +1262,21 @@ function seatPayload(seat: Seat, tok: { token: string; expiresAt: number }, maxS
   return out;
 }
 
+function safetyPayload(ch: Channel) {
+  return safetyAdvertisement(ch.safety);
+}
+
+function identityForSeat(ch: Channel, seat: Seat): string | null {
+  const state = ch.seats[seat];
+  return state ? publicKeyIdentity(state.publicKeyPem) : null;
+}
+
+function channelIdentity(ch: Channel, seat: Seat): string | null {
+  const identity = identityForSeat(ch, seat);
+  if (!identity || store.isBanned(ch.id, identity)) return null;
+  return identity;
+}
+
 function messagesAfter(ch: Channel, after: string | undefined): Message[] {
   if (!after || after === "0" || after === "") return [...ch.messages];
   const idx = ch.messages.findIndex((m) => m.id === after);
@@ -1260,6 +1286,17 @@ function messagesAfter(ch: Channel, after: string | undefined): Message[] {
     return [];
   }
   return ch.messages.slice(idx + 1);
+}
+
+function visibleMessagesAfter(ch: Channel, after: string | undefined, readerId: string): Message[] {
+  return messagesAfter(ch, after).filter(
+    (message) => !message.authorId || !store.isBlocked(ch.id, readerId, message.authorId)
+  );
+}
+
+function messagePayload(message: Message): Record<string, unknown> {
+  const { authorId, ...rest } = message;
+  return authorId === undefined ? rest : { ...rest, author_id: authorId };
 }
 
 function checkRate(ch: Channel, seat: Seat, now = Date.now()): boolean {
@@ -1280,6 +1317,7 @@ function appendMessage(ch: Channel, from: Seat, body: string): Message {
   const msg: Message = {
     id,
     from,
+    authorId: publicKeyIdentity(ch.seats[from]!.publicKeyPem),
     ts: new Date().toISOString(),
     body,
   };
@@ -1289,7 +1327,7 @@ function appendMessage(ch: Channel, from: Seat, body: string): Message {
   store.markDirty();
 
   for (const w of [...ch.waiters]) {
-    const batch = messagesAfter(ch, w.after);
+    const batch = visibleMessagesAfter(ch, w.after, w.readerId);
     if (batch.length === 0) continue;
     clearTimeout(w.timer);
     if (w.signal && w.abortHandler) {
@@ -1500,6 +1538,16 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
+  /** Inspect immutable room guarantees before a client binds a seat. */
+  app.get("/v1/channels/:id/preflight", (c) => {
+    const id = normalizeChannelId(c.req.param("id"));
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    setApiSecurityHeaders(c);
+    return c.json({ channel_id: ch.id, safety: safetyPayload(ch) });
+  });
+
   // Reserve empty channel (no seats); humans / Generate page
   app.post("/v1/channels/reserve", async (c) => {
     const badCt = rejectIfNotJson(c);
@@ -1512,6 +1560,7 @@ export function createApp(): Hono {
       max_seats?: unknown;
       ttl_seconds?: unknown;
       encrypted?: unknown;
+      safety_profile?: unknown;
     }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body ?? {};
@@ -1523,6 +1572,12 @@ export function createApp(): Hono {
     if (!ttlParsed.ok) return jsonError(c, 400, "invalid_ttl");
     const encParsed = parseEncrypted(body.encrypted);
     if (!encParsed.ok) return jsonError(c, 400, "invalid_encrypted");
+    const safety = parseSafetyProfile(body.safety_profile);
+    if (!safety) return jsonError(c, 400, "invalid_safety_profile");
+    if (!scannerAvailable(safety)) return jsonError(c, 503, "scanner_unavailable");
+    if (safety.id === "store-v1" && !encParsed.encrypted) {
+      return jsonError(c, 400, "store_profile_requires_encryption");
+    }
     if (encParsed.encrypted && !encryptionAvailable()) {
       return jsonError(
         c,
@@ -1544,6 +1599,7 @@ export function createApp(): Hono {
       ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
       encrypted: encParsed.encrypted,
+      safety,
       seats: {},
       messages: [],
       nextMsgSeq: 1,
@@ -1560,6 +1616,7 @@ export function createApp(): Hono {
       ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       absolute_expires_at: new Date(ch.absoluteExpiresAt).toISOString(),
       idle_expires_at: new Date(ch.idleExpiresAt).toISOString(),
+      safety: safetyPayload(ch),
     });
   });
 
@@ -1576,6 +1633,8 @@ export function createApp(): Hono {
       ttl_seconds?: unknown;
       nick?: unknown;
       encrypted?: unknown;
+      safety_profile?: unknown;
+      accepted_terms_version?: unknown;
     }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
@@ -1594,6 +1653,15 @@ export function createApp(): Hono {
     if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
     const encParsed = parseEncrypted(body.encrypted);
     if (!encParsed.ok) return jsonError(c, 400, "invalid_encrypted");
+    const safety = parseSafetyProfile(body.safety_profile);
+    if (!safety) return jsonError(c, 400, "invalid_safety_profile");
+    if (!scannerAvailable(safety)) return jsonError(c, 503, "scanner_unavailable");
+    if (!termsAccepted(safety, body.accepted_terms_version)) {
+      return jsonError(c, 428, "terms_not_accepted");
+    }
+    if (safety.id === "store-v1" && !encParsed.encrypted) {
+      return jsonError(c, 400, "store_profile_requires_encryption");
+    }
     if (encParsed.encrypted && !encryptionAvailable()) {
       return jsonError(
         c,
@@ -1623,6 +1691,7 @@ export function createApp(): Hono {
       ...channelDeadlines(now, ttlParsed.ttlMs),
       maxSeats,
       encrypted: encParsed.encrypted,
+      safety,
       seats: {
         "1": seat1,
       },
@@ -1644,6 +1713,7 @@ export function createApp(): Hono {
       ttl_seconds: Math.round((ch.absoluteExpiresAt - now) / 1000),
       max_seats: maxSeats,
       encrypted: ch.encrypted,
+      safety: safetyPayload(ch),
     };
     if (nickParsed.nick !== undefined) resp.nick = nickParsed.nick;
     return c.json(resp);
@@ -1665,12 +1735,16 @@ export function createApp(): Hono {
       nick?: unknown;
       challenge?: unknown;
       signature_base64?: unknown;
+      accepted_terms_version?: unknown;
     }>(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
 
     const ch = store.getChannel(id);
     if (!ch) return jsonError(c, 404, "channel_not_found");
+    if (!termsAccepted(ch.safety, body.accepted_terms_version)) {
+      return jsonError(c, 428, "terms_not_accepted");
+    }
 
     if (!body.public_key_pem || typeof body.public_key_pem !== "string") {
       return jsonError(c, 400, "missing_public_key_pem");
@@ -1681,6 +1755,8 @@ export function createApp(): Hono {
     const nickParsed = parseNick(body.nick);
     if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
     const pem = normalizePem(body.public_key_pem);
+    const identity = publicKeyIdentity(pem);
+    if (store.isBanned(ch.id, identity)) return jsonError(c, 403, "participant_banned");
     const existing = seatForPubkey(ch, pem);
     if (existing) {
       // Re-binding an occupied seat mints a fresh bearer, so it must prove
@@ -1714,7 +1790,7 @@ export function createApp(): Hono {
       const tok = await rotateSeatToken(id, existing);
       store.touchIdle(ch);
       setApiSecurityHeaders(c);
-      return c.json(seatPayload(existing, tok, ch.maxSeats, seatState.nick));
+      return c.json({ ...seatPayload(existing, tok, ch.maxSeats, seatState.nick), safety: safetyPayload(ch) });
     }
     const seat = nextSeat(ch);
     if (!seat) return jsonError(c, 409, "channel_full");
@@ -1729,7 +1805,7 @@ export function createApp(): Hono {
     store.touchIdle(ch, now);
     const tok = mintToken(id, seat, now);
     setApiSecurityHeaders(c);
-    return c.json(seatPayload(seat, tok, ch.maxSeats, seatState.nick));
+    return c.json({ ...seatPayload(seat, tok, ch.maxSeats, seatState.nick), safety: safetyPayload(ch) });
   });
 
   // Extend absolute TTL (bound seat). Clamped to createdAt + 30d; idle re-armed.
@@ -1881,6 +1957,9 @@ export function createApp(): Hono {
     if (!ch) return jsonError(c, 404, "channel_not_found");
     const seat = seatForPubkey(ch, body.public_key_pem);
     if (!seat) return jsonError(c, 403, "public_key_not_registered");
+    if (store.isBanned(ch.id, publicKeyIdentity(body.public_key_pem))) {
+      return jsonError(c, 403, "participant_banned");
+    }
     if (!consumeChallenge(body.challenge, channelId, body.public_key_pem)) {
       return jsonError(c, 401, "invalid_or_expired_challenge");
     }
@@ -1991,6 +2070,7 @@ export function createApp(): Hono {
 
     for (const [id, ch] of store.channels) {
       if (store.isExpired(ch)) continue;
+      if (store.isBanned(id, publicKeyIdentity(pem))) continue;
       store.sweepChannelFiles(ch);
 
       let holdsSeat = false;
@@ -2041,6 +2121,7 @@ export function createApp(): Hono {
     const ch = store.getChannel(id);
     if (!ch) return jsonError(c, 404, "channel_not_found");
     if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+    if (!channelIdentity(ch, tok.seat)) return jsonError(c, 403, "participant_banned");
 
     const parsed = await readJsonBody<{ body?: string }>(c);
     if (!parsed.ok) return parsed.response;
@@ -2051,12 +2132,15 @@ export function createApp(): Hono {
     if (bytes > BODY_MAX_BYTES) {
       return jsonError(c, 413, "body_too_large", `max ${BODY_MAX_BYTES} UTF-8 bytes`);
     }
+    if (ch.safety.id === "store-v1" && !scanStoreV1Message(body.body)) {
+      return jsonError(c, 422, "content_rejected");
+    }
     if (!checkRate(ch, tok.seat)) return jsonError(c, 429, "rate_limited");
 
     store.touchIdle(ch);
     const msg = appendMessage(ch, tok.seat, body.body);
     setApiSecurityHeaders(c);
-    return c.json({ message: msg }, 201);
+    return c.json({ message: messagePayload(msg) }, 201);
   });
 
   // Poll messages (optional long-poll)
@@ -2070,6 +2154,8 @@ export function createApp(): Hono {
     const ch = store.getChannel(id);
     if (!ch) return jsonError(c, 404, "channel_not_found");
     if (!ch.seats[tok.seat]) return jsonError(c, 401, "unauthorized");
+    const readerId = channelIdentity(ch, tok.seat);
+    if (!readerId) return jsonError(c, 403, "participant_banned");
 
     const after = c.req.query("after") ?? "";
     let waitMs = parseInt(c.req.query("wait_ms") ?? "0", 10);
@@ -2077,11 +2163,11 @@ export function createApp(): Hono {
     if (waitMs > MAX_LONG_POLL_MS) waitMs = MAX_LONG_POLL_MS;
 
     store.touchIdle(ch);
-    const immediate = messagesAfter(ch, after);
+    const immediate = visibleMessagesAfter(ch, after, readerId);
     if (immediate.length > 0 || waitMs === 0) {
       setApiSecurityHeaders(c);
       return c.json({
-        messages: immediate,
+        messages: immediate.map(messagePayload),
         cursor: ch.messages.length ? ch.messages[ch.messages.length - 1].id : after || "0",
       });
     }
@@ -2101,9 +2187,10 @@ export function createApp(): Hono {
     const msgs = await new Promise<Message[]>((resolve) => {
       const waiter: Waiter = {
         after,
+        readerId,
         resolve,
         timer: setTimeout(() => {
-          clearWaiter(ch, waiter, messagesAfter(ch, after));
+          clearWaiter(ch, waiter, visibleMessagesAfter(ch, after, readerId));
         }, hold),
         signal,
       };
@@ -2128,9 +2215,97 @@ export function createApp(): Hono {
     store.touchIdle(ch);
     setApiSecurityHeaders(c);
     return c.json({
-      messages: msgs,
+      messages: msgs.map(messagePayload),
       cursor: ch.messages.length ? ch.messages[ch.messages.length - 1].id : after || "0",
     });
+  });
+
+  // Directional participant blocks are keyed by stable author identities, never seats.
+  app.post("/v1/channels/:id/blocks", async (c) => {
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const id = normalizeChannelId(c.req.param("id"));
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    const blockerId = channelIdentity(ch, tok.seat);
+    if (!blockerId) return jsonError(c, 403, "participant_banned");
+    if (ch.safety.id !== "store-v1") return jsonError(c, 409, "safety_feature_unavailable");
+    const parsed = await readJsonBody<{ author_id?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const blockedId = parsed.body.author_id;
+    if (!isPublicKeyIdentity(blockedId) || blockedId === blockerId) {
+      return jsonError(c, 400, "invalid_author_id");
+    }
+    const rec = { channelId: id, blockerId, blockedId, createdAt: Date.now() };
+    store.blocks.set(store.blockKey(id, blockerId, blockedId), rec);
+    store.markDirty();
+    setApiSecurityHeaders(c);
+    return c.json({ author_id: blockedId, blocked: true });
+  });
+
+  app.delete("/v1/channels/:id/blocks/:author_id", (c) => {
+    const id = normalizeChannelId(c.req.param("id"));
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    const blockerId = channelIdentity(ch, tok.seat);
+    if (!blockerId) return jsonError(c, 403, "participant_banned");
+    if (ch.safety.id !== "store-v1") return jsonError(c, 409, "safety_feature_unavailable");
+    const blockedId = c.req.param("author_id");
+    if (!isPublicKeyIdentity(blockedId)) return jsonError(c, 400, "invalid_author_id");
+    store.blocks.delete(store.blockKey(id, blockerId, blockedId));
+    store.markDirty();
+    setApiSecurityHeaders(c);
+    return c.json({ author_id: blockedId, blocked: false });
+  });
+
+  // Reports preserve an immutable copy because normal transcript retention is short.
+  app.post("/v1/channels/:id/reports", async (c) => {
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const id = normalizeChannelId(c.req.param("id"));
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    const reporterId = channelIdentity(ch, tok.seat);
+    if (!reporterId) return jsonError(c, 403, "participant_banned");
+    if (ch.safety.id !== "store-v1") return jsonError(c, 409, "safety_feature_unavailable");
+    const parsed = await readJsonBody<{ message_id?: unknown; reason?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const { message_id: messageId, reason } = parsed.body;
+    if (typeof messageId !== "string" || !/^m\d+$/.test(messageId)) {
+      return jsonError(c, 400, "invalid_message_id");
+    }
+    if (typeof reason !== "string" || !reason.trim() || Buffer.byteLength(reason, "utf8") > 1024) {
+      return jsonError(c, 400, "invalid_report_reason");
+    }
+    const message = ch.messages.find((candidate) => candidate.id === messageId);
+    if (!message || !message.authorId) return jsonError(c, 404, "message_not_found");
+    const now = Date.now();
+    const reportId = `r_${randomBytes(16).toString("base64url")}`;
+    const expiresAt = now + reportRetentionMs();
+    store.reports.set(reportId, {
+      id: reportId,
+      channelId: id,
+      messageId,
+      reporterId,
+      authorId: message.authorId,
+      reason: reason.trim(),
+      evidenceBody: message.body,
+      createdAt: now,
+      expiresAt,
+      status: "open",
+    });
+    store.markDirty();
+    setApiSecurityHeaders(c);
+    return c.json({ report_id: reportId, expires_at: new Date(expiresAt).toISOString() }, 201);
   });
 
 
@@ -2243,6 +2418,95 @@ export function createApp(): Hono {
       seat: rec.seat,
       content_base64: rec.bytes.toString("base64"),
     });
+  });
+
+  function requireModerator(c: { req: { header: (name: string) => string | undefined } }) {
+    return moderatorAuthorized(c.req.header("Authorization"));
+  }
+
+  function recordModerationAction(action: string, targetId: string, detail?: string): void {
+    const id = `ma_${randomBytes(12).toString("base64url")}`;
+    store.moderationActions.set(id, { id, action, targetId, createdAt: Date.now(), detail });
+    store.markDirty();
+  }
+
+  app.get("/v1/moderation/reports", (c) => {
+    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
+    setApiSecurityHeaders(c);
+    return c.json({ reports: [...store.reports.values()] });
+  });
+
+  app.post("/v1/moderation/reports/:id/:decision", async (c) => {
+    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
+    const decision = c.req.param("decision");
+    if (decision !== "resolve" && decision !== "dismiss") return jsonError(c, 400, "invalid_moderation_action");
+    const report = store.reports.get(c.req.param("id"));
+    if (!report) return jsonError(c, 404, "report_not_found");
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const parsed = await readOptionalJsonBody<{ resolution?: unknown }>(c);
+    if (!parsed.ok) return parsed.response;
+    const resolution = parsed.body?.resolution;
+    if (resolution !== undefined && (typeof resolution !== "string" || Buffer.byteLength(resolution, "utf8") > 1024)) {
+      return jsonError(c, 400, "invalid_moderation_resolution");
+    }
+    report.status = decision === "resolve" ? "resolved" : "dismissed";
+    report.resolvedAt = Date.now();
+    if (typeof resolution === "string" && resolution.trim()) report.resolution = resolution.trim();
+    recordModerationAction(report.status, report.id, report.resolution);
+    setApiSecurityHeaders(c);
+    return c.json({ report_id: report.id, status: report.status });
+  });
+
+  app.post("/v1/moderation/bans", async (c) => {
+    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
+    const badCt = rejectIfNotJson(c);
+    if (badCt) return badCt;
+    const parsed = await readJsonBody<{
+      scope?: unknown;
+      channel_id?: unknown;
+      author_id?: unknown;
+      reason?: unknown;
+    }>(c);
+    if (!parsed.ok) return parsed.response;
+    const { scope, channel_id: rawChannelId, author_id: authorId, reason } = parsed.body;
+    if (scope !== "room" && scope !== "global") return jsonError(c, 400, "invalid_ban_scope");
+    if (!isPublicKeyIdentity(authorId)) return jsonError(c, 400, "invalid_author_id");
+    const channelId = scope === "room" && typeof rawChannelId === "string" ? normalizeChannelId(rawChannelId) ?? undefined : undefined;
+    if (scope === "room" && !channelId) return jsonError(c, 400, "invalid_channel_id");
+    if (reason !== undefined && (typeof reason !== "string" || Buffer.byteLength(reason, "utf8") > 1024)) {
+      return jsonError(c, 400, "invalid_ban_reason");
+    }
+    const id = `b_${randomBytes(16).toString("base64url")}`;
+    const ban = {
+      id,
+      scope: scope as "room" | "global",
+      channelId,
+      authorId,
+      createdAt: Date.now(),
+      reason: typeof reason === "string" ? reason.trim() || undefined : undefined,
+    };
+    store.bans.set(store.banKey(scope, authorId, channelId), ban);
+    recordModerationAction("ban", id, scope);
+    setApiSecurityHeaders(c);
+    return c.json({ ban });
+  });
+
+  app.delete("/v1/moderation/bans/:id", (c) => {
+    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
+    const id = c.req.param("id");
+    let foundKey: string | null = null;
+    for (const [key, ban] of store.bans) {
+      if (ban.id === id) {
+        foundKey = key;
+        break;
+      }
+    }
+    if (!foundKey) return jsonError(c, 404, "ban_not_found");
+    store.bans.delete(foundKey);
+    recordModerationAction("unban", id);
+    setApiSecurityHeaders(c);
+    return c.json({ ban_id: id, active: false });
   });
 
   return app;

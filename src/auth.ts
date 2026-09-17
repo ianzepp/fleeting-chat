@@ -1,4 +1,4 @@
-import { createPublicKey, verify, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createPublicKey, verify, randomBytes, timingSafeEqual } from "node:crypto";
 import { tokenDigest } from "./crypto-at-rest.js";
 import {
   store,
@@ -195,4 +195,22 @@ export function resolveAgentBearer(authHeader: string | undefined): AgentTokenRe
 
 export function pemFingerprint(pem: string): string {
   return normalizePem(pem);
+}
+
+/** Stable opaque moderation identity. It is derived from the normalized public
+ * key rather than a seat or nickname, so it survives bearer refresh and rejoin. */
+export function publicKeyIdentity(pem: string): string {
+  return `ed25519:${createHash("sha256").update(normalizePem(pem)).digest("base64url")}`;
+}
+
+export function isPublicKeyIdentity(value: unknown): value is string {
+  return typeof value === "string" && /^ed25519:[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+/** Operator authority is deliberately separate from participant bearers. */
+export function moderatorAuthorized(authHeader: string | undefined): boolean {
+  const configured = process.env.MODERATION_TOKEN;
+  if (!configured || !authHeader) return false;
+  const m = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
+  return !!m && safeEqualStr(m[1], configured);
 }

@@ -35,14 +35,19 @@ import {
 } from "./crypto-at-rest.js";
 import type {
   AgentChallengeRecord,
+  AbuseReport,
   Channel,
   ChannelFile,
   ChallengeRecord,
   Message,
+  ModerationAction,
+  ModerationBan,
+  RoomBlock,
   Seat,
   SeatState,
   Store,
 } from "./store.js";
+import { scannerAvailable, STORE_V1_REVISION, type SafetyProfile } from "./safety.js";
 
 /** Thrown when the store on disk cannot be read as-is. Refusing to continue is
  *  deliberate: starting empty and then writing would replace ciphertext with
@@ -99,6 +104,7 @@ interface PersistedChannel {
   maxSeats: number;
   /** Absent on legacy JSON → treat as false (plaintext already on disk). */
   encrypted?: boolean;
+  safety?: SafetyProfile;
   seats: Partial<Record<string, SeatState>>;
   messages: Array<Omit<Message, "from"> & { from: string }>;
   nextMsgSeq: number;
@@ -130,6 +136,10 @@ interface PersistedStore {
   agentTokens: PersistedAgentToken[];
   agentChallenges: AgentChallengeRecord[];
   usedChannelIds: string[];
+  blocks?: RoomBlock[];
+  reports?: AbuseReport[];
+  bans?: ModerationBan[];
+  moderationActions?: ModerationAction[];
 }
 
 /** Digest to key a stored token row by, or null when it carries neither form. */
@@ -164,6 +174,20 @@ function migrateSeatsMap(
     out[migrateSeatId(k)] = v;
   }
   return out;
+}
+
+/** Persisted rooms predate safety profiles. Only the exact shipped profile may
+ * survive a load; malformed or future data is never accidentally promoted. */
+function loadedSafety(raw: unknown): SafetyProfile {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    (raw as { id?: unknown }).id === "store-v1" &&
+    (raw as { revision?: unknown }).revision === STORE_V1_REVISION
+  ) {
+    return { id: "store-v1", revision: STORE_V1_REVISION };
+  }
+  return { id: "unrestricted", revision: STORE_V1_REVISION };
 }
 
 function sqlitePath(dataDir: string): string {
@@ -217,6 +241,8 @@ function createSchema(db: Database): void {
       idle_ttl_ms INTEGER NOT NULL,
       max_seats INTEGER NOT NULL,
       encrypted INTEGER NOT NULL,
+      safety_profile TEXT NOT NULL,
+      safety_revision INTEGER NOT NULL,
       seats_json TEXT NOT NULL,
       next_msg_seq INTEGER NOT NULL
     );
@@ -224,6 +250,7 @@ function createSchema(db: Database): void {
       channel_id TEXT NOT NULL,
       id TEXT NOT NULL,
       from_seat TEXT NOT NULL,
+      author_id TEXT NOT NULL,
       nick TEXT,
       ts TEXT NOT NULL,
       body TEXT NOT NULL,
@@ -270,11 +297,57 @@ function createSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS used_channel_ids (
       id TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS room_blocks (
+      channel_id TEXT NOT NULL,
+      blocker_id TEXT NOT NULL,
+      blocked_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (channel_id, blocker_id, blocked_id)
+    );
+    CREATE TABLE IF NOT EXISTS reports (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      reporter_id TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      evidence_body TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      resolved_at INTEGER,
+      resolution TEXT
+    );
+    CREATE TABLE IF NOT EXISTS moderation_bans (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      channel_id TEXT,
+      author_id TEXT NOT NULL,
+      reason TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS moderation_actions (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      detail TEXT
+    );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `);
+}
+
+function tableExists(db: Database, name: string): boolean {
+  return !!db.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name = '${name}'`)[0];
+}
+
+function tableHasColumn(db: Database, table: string, column: string): boolean {
+  if (!tableExists(db, table)) return false;
+  const result = db.exec(`PRAGMA table_info(${table})`)[0];
+  return !!result?.values.some((row) => row[1] === column);
 }
 
 /** Let the event loop serve other requests between slices of a save. */
@@ -321,12 +394,12 @@ async function writeStore(store: Store, dataDir: string): Promise<void> {
     const insChannel = db.prepare(
       `INSERT INTO channels (
         id, created_at, absolute_expires_at, idle_expires_at, idle_ttl_ms,
-        max_seats, encrypted, seats_json, next_msg_seq
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        max_seats, encrypted, safety_profile, safety_revision, seats_json, next_msg_seq
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const insMsg = db.prepare(
-      `INSERT INTO messages (channel_id, id, from_seat, nick, ts, body, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (channel_id, id, from_seat, author_id, nick, ts, body, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const insFile = db.prepare(
       `INSERT INTO files (
@@ -350,6 +423,8 @@ async function writeStore(store: Store, dataDir: string): Promise<void> {
         ch.idleTtlMs,
         ch.maxSeats,
         encrypted ? 1 : 0,
+        ch.safety.id,
+        ch.safety.revision,
         JSON.stringify(ch.seats),
         ch.nextMsgSeq,
       ]);
@@ -363,6 +438,7 @@ async function writeStore(store: Store, dataDir: string): Promise<void> {
           ch.id,
           m.id,
           m.from,
+          m.authorId ?? "",
           m.nick ?? null,
           m.ts,
           body,
@@ -445,6 +521,55 @@ async function writeStore(store: Store, dataDir: string): Promise<void> {
     }
     insUsed.free();
 
+    const insBlock = db.prepare(
+      `INSERT INTO room_blocks (channel_id, blocker_id, blocked_id, created_at) VALUES (?, ?, ?, ?)`
+    );
+    for (const block of store.blocks.values()) {
+      insBlock.run([block.channelId, block.blockerId, block.blockedId, block.createdAt]);
+    }
+    insBlock.free();
+
+    const insReport = db.prepare(
+      `INSERT INTO reports (
+        id, channel_id, message_id, reporter_id, author_id, reason, evidence_body,
+        created_at, expires_at, status, resolved_at, resolution
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const report of store.reports.values()) {
+      if (!key) throw new Error("cannot persist moderation reports: STORE_ENCRYPTION_KEY missing");
+      insReport.run([
+        report.id,
+        report.channelId,
+        report.messageId,
+        report.reporterId,
+        report.authorId,
+        encryptUtf8(report.reason, key),
+        encryptUtf8(report.evidenceBody, key),
+        report.createdAt,
+        report.expiresAt,
+        report.status,
+        report.resolvedAt ?? null,
+        report.resolution === undefined ? null : encryptUtf8(report.resolution, key),
+      ]);
+    }
+    insReport.free();
+
+    const insBan = db.prepare(
+      `INSERT INTO moderation_bans (id, scope, channel_id, author_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const ban of store.bans.values()) {
+      insBan.run([ban.id, ban.scope, ban.channelId ?? null, ban.authorId, ban.reason ?? null, ban.createdAt]);
+    }
+    insBan.free();
+
+    const insAction = db.prepare(
+      `INSERT INTO moderation_actions (id, action, target_id, created_at, detail) VALUES (?, ?, ?, ?, ?)`
+    );
+    for (const action of store.moderationActions.values()) {
+      insAction.run([action.id, action.action, action.targetId, action.createdAt, action.detail ?? null]);
+    }
+    insAction.free();
+
     db.run("COMMIT");
 
     const file = sqlitePath(dataDir);
@@ -495,6 +620,10 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
   store.challenges.clear();
   store.agentTokens.clear();
   store.agentChallenges.clear();
+  store.blocks.clear();
+  store.reports.clear();
+  store.bans.clear();
+  store.moderationActions.clear();
   store.usedChannelIds.clear();
 
   for (const id of data.usedChannelIds ?? []) {
@@ -564,6 +693,7 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
       idleTtlMs: raw.idleTtlMs,
       maxSeats: raw.maxSeats,
       encrypted,
+      safety: loadedSafety(raw.safety),
       seats: migrateSeatsMap(raw.seats),
       messages,
       nextMsgSeq: raw.nextMsgSeq ?? 1,
@@ -602,6 +732,18 @@ function applyLoaded(store: Store, data: PersistedStore, now = Date.now()): void
     if (now >= rec.expiresAt) continue;
     store.agentChallenges.set(rec.challenge, rec);
   }
+  for (const block of data.blocks ?? []) {
+    store.blocks.set(store.blockKey(block.channelId, block.blockerId, block.blockedId), block);
+  }
+  for (const report of data.reports ?? []) {
+    if (now < report.expiresAt) store.reports.set(report.id, report);
+  }
+  for (const ban of data.bans ?? []) {
+    store.bans.set(store.banKey(ban.scope, ban.authorId, ban.channelId), ban);
+  }
+  for (const action of data.moderationActions ?? []) {
+    store.moderationActions.set(action.id, action);
+  }
 }
 
 function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
@@ -610,7 +752,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
   const db = new SQL.Database(buf);
   try {
     // Fail before any row is read if the configured key is not the one that wrote this.
-    assertKeyMatches(db);
+    const key = assertKeyMatches(db);
     const data: PersistedStore = {
       version: 1,
       channels: [],
@@ -619,11 +761,21 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
       agentTokens: [],
       agentChallenges: [],
       usedChannelIds: [],
+      blocks: [],
+      reports: [],
+      bans: [],
+      moderationActions: [],
     };
+
+    const hasSafety = tableHasColumn(db, "channels", "safety_profile");
+    const hasAuthor = tableHasColumn(db, "messages", "author_id");
 
     const channelRows = db.exec(
       `SELECT id, created_at, absolute_expires_at, idle_expires_at, idle_ttl_ms,
-              max_seats, encrypted, seats_json, next_msg_seq
+              max_seats, encrypted,
+              ${hasSafety ? "safety_profile" : "'unrestricted'"} AS safety_profile,
+              ${hasSafety ? "safety_revision" : String(STORE_V1_REVISION)} AS safety_revision,
+              seats_json, next_msg_seq
        FROM channels`
     );
     if (channelRows[0]) {
@@ -636,6 +788,8 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
           idleTtlMs,
           maxSeats,
           encFlag,
+          safetyProfile,
+          safetyRevision,
           seatsJson,
           nextMsgSeq,
         ] = row as [
@@ -648,11 +802,13 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
           number,
           string,
           number,
+          string,
+          number,
         ];
         const encrypted = encFlag === 1;
         const messages: PersistedChannel["messages"] = [];
         const msgStmt = db.prepare(
-          `SELECT id, from_seat, nick, ts, body, seq FROM messages
+          `SELECT id, from_seat, ${hasAuthor ? "author_id" : "''"} AS author_id, nick, ts, body, seq FROM messages
            WHERE channel_id = ? ORDER BY seq ASC`
         );
         msgStmt.bind([id]);
@@ -660,6 +816,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
           const m = msgStmt.getAsObject() as {
             id: string;
             from_seat: string;
+            author_id: string;
             nick: string | null;
             ts: string;
             body: string;
@@ -671,6 +828,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
             ts: m.ts,
             body: m.body,
           };
+          if (m.author_id) msg.authorId = m.author_id;
           if (m.nick != null && m.nick !== "") msg.nick = m.nick;
           messages.push(msg);
         }
@@ -721,6 +879,7 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
           idleTtlMs,
           maxSeats,
           encrypted,
+          safety: loadedSafety({ id: safetyProfile, revision: safetyRevision }),
           seats,
           messages,
           nextMsgSeq,
@@ -780,6 +939,90 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
           publicKeyPem: row[1] as string,
           expiresAt: row[2] as number,
         });
+      }
+    }
+
+    if (tableExists(db, "room_blocks")) {
+      const rows = db.exec(`SELECT channel_id, blocker_id, blocked_id, created_at FROM room_blocks`);
+      if (rows[0]) {
+        for (const row of rows[0].values) {
+          data.blocks!.push({
+            channelId: row[0] as string,
+            blockerId: row[1] as string,
+            blockedId: row[2] as string,
+            createdAt: row[3] as number,
+          });
+        }
+      }
+    }
+
+    if (tableExists(db, "reports")) {
+      if (!key) throw new StoreIntegrityError("STORE_ENCRYPTION_KEY is required to read moderation reports");
+      const rows = db.exec(
+        `SELECT id, channel_id, message_id, reporter_id, author_id, reason, evidence_body,
+                created_at, expires_at, status, resolved_at, resolution FROM reports`
+      );
+      if (rows[0]) {
+        for (const row of rows[0].values) {
+          try {
+            const status = row[9] as string;
+            if (status !== "open" && status !== "resolved" && status !== "dismissed") {
+              throw new Error("unknown report status");
+            }
+            const report: AbuseReport = {
+              id: row[0] as string,
+              channelId: row[1] as string,
+              messageId: row[2] as string,
+              reporterId: row[3] as string,
+              authorId: row[4] as string,
+              reason: decryptUtf8(row[5] as string, key),
+              evidenceBody: decryptUtf8(row[6] as string, key),
+              createdAt: row[7] as number,
+              expiresAt: row[8] as number,
+              status,
+            };
+            if (row[10] != null) report.resolvedAt = row[10] as number;
+            if (row[11] != null) report.resolution = decryptUtf8(row[11] as string, key);
+            data.reports!.push(report);
+          } catch (err) {
+            throw new StoreIntegrityError(
+              `cannot decrypt moderation report ${row[0]}: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        }
+      }
+    }
+
+    if (tableExists(db, "moderation_bans")) {
+      const rows = db.exec(`SELECT id, scope, channel_id, author_id, reason, created_at FROM moderation_bans`);
+      if (rows[0]) {
+        for (const row of rows[0].values) {
+          const scope = row[1] as string;
+          if (scope !== "room" && scope !== "global") continue;
+          data.bans!.push({
+            id: row[0] as string,
+            scope,
+            channelId: row[2] == null ? undefined : row[2] as string,
+            authorId: row[3] as string,
+            reason: row[4] == null ? undefined : row[4] as string,
+            createdAt: row[5] as number,
+          });
+        }
+      }
+    }
+
+    if (tableExists(db, "moderation_actions")) {
+      const rows = db.exec(`SELECT id, action, target_id, created_at, detail FROM moderation_actions`);
+      if (rows[0]) {
+        for (const row of rows[0].values) {
+          data.moderationActions!.push({
+            id: row[0] as string,
+            action: row[1] as string,
+            targetId: row[2] as string,
+            createdAt: row[3] as number,
+            detail: row[4] == null ? undefined : row[4] as string,
+          });
+        }
       }
     }
 
@@ -908,6 +1151,13 @@ export async function loadStore(store: Store): Promise<void> {
   try {
     if (existsSync(sqlite)) {
       loadFromSqlite(store, dataDir);
+      for (const channel of store.channels.values()) {
+        if (!scannerAvailable(channel.safety)) {
+          throw new StoreIntegrityError(
+            `channel ${channel.id} requires an unavailable store-v1 scanner`
+          );
+        }
+      }
       // Leftover JSON after a prior partial migrate: never re-import over SQLite,
       // and do not leave its plaintext bodies or tokens on the volume.
       if (existsSync(jsonPath) || existsSync(migratedPath)) {
@@ -921,6 +1171,13 @@ export async function loadStore(store: Store): Promise<void> {
 
     if (existsSync(jsonPath)) {
       loadFromJsonFile(store, jsonPath);
+      for (const channel of store.channels.values()) {
+        if (!scannerAvailable(channel.safety)) {
+          throw new StoreIntegrityError(
+            `channel ${channel.id} requires an unavailable store-v1 scanner`
+          );
+        }
+      }
       await writeStore(store, dataDir);
       removeLegacyStoreFiles([jsonPath, migratedPath]);
       console.error(

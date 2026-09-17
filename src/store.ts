@@ -1,6 +1,7 @@
 /** In-memory channel store for the fleeting.chat spike. */
 
 import { scheduleSave } from "./persist.js";
+import type { SafetyProfile } from "./safety.js";
 
 export const SEATS = ["1", "2", "3", "4", "5", "6", "7", "8"] as const;
 export type Seat = (typeof SEATS)[number];
@@ -32,6 +33,8 @@ export function occupiedSeatCount(ch: Channel): number {
 export interface Message {
   id: string;
   from: Seat;
+  /** Stable opaque key-derived author identity; required for governed rooms. */
+  authorId?: string;
   /** Copied from seat.nick at send time when set; omitted when seat has no nick. */
   nick?: string;
   ts: string; // ISO-8601
@@ -68,6 +71,8 @@ export interface Channel {
   /** When true, message bodies and file bytes are AES-GCM encrypted at rest in SQLite.
    *  Default true on create/reserve. Legacy migrated channels without the flag are false. */
   encrypted: boolean;
+  /** Immutable at creation. Legacy rows load as unrestricted. */
+  safety: SafetyProfile;
   seats: Partial<Record<Seat, SeatState>>;
   messages: Message[];
   nextMsgSeq: number;
@@ -76,6 +81,7 @@ export interface Channel {
   /** Waiters for long-poll: resolve when a new message arrives. */
   waiters: Array<{
     after: string;
+    readerId: string;
     resolve: (msgs: Message[]) => void;
     timer: ReturnType<typeof setTimeout>;
     abortHandler?: () => void;
@@ -130,6 +136,46 @@ export interface AgentChallengeRecord {
 export interface IpRateWindow {
   start: number;
   count: number;
+}
+
+/** A participant's directional room block. */
+export interface RoomBlock {
+  channelId: string;
+  blockerId: string;
+  blockedId: string;
+  createdAt: number;
+}
+
+export interface AbuseReport {
+  id: string;
+  channelId: string;
+  messageId: string;
+  reporterId: string;
+  authorId: string;
+  reason: string;
+  evidenceBody: string;
+  createdAt: number;
+  expiresAt: number;
+  status: "open" | "resolved" | "dismissed";
+  resolvedAt?: number;
+  resolution?: string;
+}
+
+export interface ModerationBan {
+  id: string;
+  scope: "room" | "global";
+  channelId?: string;
+  authorId: string;
+  reason?: string;
+  createdAt: number;
+}
+
+export interface ModerationAction {
+  id: string;
+  action: string;
+  targetId: string;
+  createdAt: number;
+  detail?: string;
 }
 
 export const ABSOLUTE_TTL_MS = 48 * 60 * 60 * 1000;
@@ -190,6 +236,10 @@ export class Store {
   challenges = new Map<string, ChallengeRecord>();
   agentTokens = new Map<string, AgentTokenRecord>();
   agentChallenges = new Map<string, AgentChallengeRecord>();
+  blocks = new Map<string, RoomBlock>();
+  reports = new Map<string, AbuseReport>();
+  bans = new Map<string, ModerationBan>();
+  moderationActions = new Map<string, ModerationAction>();
   /** Channel id → when it was issued, so the window can expire. */
   usedChannelIds = new Map<string, number>();
   /** create + join + auth + file upload requests per IP */
@@ -285,7 +335,32 @@ export class Store {
     for (const [cid, rec] of this.challenges) {
       if (rec.channelId === id) this.challenges.delete(cid);
     }
+    for (const [key, block] of this.blocks) {
+      if (block.channelId === id) this.blocks.delete(key);
+    }
+    for (const [key, ban] of this.bans) {
+      if (ban.scope === "room" && ban.channelId === id) this.bans.delete(key);
+    }
     this.markDirty();
+  }
+
+  blockKey(channelId: string, blockerId: string, blockedId: string): string {
+    return `${channelId}:${blockerId}:${blockedId}`;
+  }
+
+  isBlocked(channelId: string, blockerId: string, blockedId: string): boolean {
+    return this.blocks.has(this.blockKey(channelId, blockerId, blockedId));
+  }
+
+  banKey(scope: ModerationBan["scope"], authorId: string, channelId?: string): string {
+    return scope === "global" ? `global:${authorId}` : `room:${channelId}:${authorId}`;
+  }
+
+  isBanned(channelId: string, authorId: string): boolean {
+    return (
+      this.bans.has(this.banKey("global", authorId)) ||
+      this.bans.has(this.banKey("room", authorId, channelId))
+    );
   }
 
   /** Returns false if over limit (caller should 429). Increments on success. */
@@ -346,7 +421,14 @@ export class Store {
       if (now - win.start >= 60_000) this.ipRate.delete(ip);
     }
     this.pruneChannelIds(now);
-    if (authChanged) this.markDirty();
+    let reportsChanged = false;
+    for (const [id, report] of this.reports) {
+      if (now >= report.expiresAt) {
+        this.reports.delete(id);
+        reportsChanged = true;
+      }
+    }
+    if (authChanged || reportsChanged) this.markDirty();
   }
 }
 

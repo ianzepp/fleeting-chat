@@ -20,6 +20,10 @@ export function freshStore(): void {
   store.challenges.clear();
   store.agentTokens.clear();
   store.agentChallenges.clear();
+  store.blocks.clear();
+  store.reports.clear();
+  store.bans.clear();
+  store.moderationActions.clear();
   store.usedChannelIds.clear();
   store.ipRate.clear();
 }
