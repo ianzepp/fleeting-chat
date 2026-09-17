@@ -179,15 +179,19 @@ function migrateSeatsMap(
 /** Persisted rooms predate safety profiles. Only the exact shipped profile may
  * survive a load; malformed or future data is never accidentally promoted. */
 function loadedSafety(raw: unknown): SafetyProfile {
-  if (
-    raw &&
-    typeof raw === "object" &&
-    (raw as { id?: unknown }).id === "store-v1" &&
-    (raw as { revision?: unknown }).revision === STORE_V1_REVISION
-  ) {
-    return { id: "store-v1", revision: STORE_V1_REVISION };
+  if (raw === undefined) return { id: "unrestricted", revision: STORE_V1_REVISION };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new StoreIntegrityError("persisted channel safety profile is malformed");
   }
-  return { id: "unrestricted", revision: STORE_V1_REVISION };
+  const profile = raw as Record<string, unknown>;
+  if (
+    Object.keys(profile).length !== 2 ||
+    profile.revision !== STORE_V1_REVISION ||
+    (profile.id !== "unrestricted" && profile.id !== "store-v1")
+  ) {
+    throw new StoreIntegrityError("persisted channel safety profile is unsupported");
+  }
+  return { id: profile.id, revision: STORE_V1_REVISION };
 }
 
 function sqlitePath(dataDir: string): string {
@@ -767,7 +771,12 @@ function loadFromSqlite(store: Store, dataDir: string, now = Date.now()): void {
       moderationActions: [],
     };
 
-    const hasSafety = tableHasColumn(db, "channels", "safety_profile");
+    const hasSafetyProfile = tableHasColumn(db, "channels", "safety_profile");
+    const hasSafetyRevision = tableHasColumn(db, "channels", "safety_revision");
+    if (hasSafetyProfile !== hasSafetyRevision) {
+      throw new StoreIntegrityError("persisted channel safety columns are incomplete");
+    }
+    const hasSafety = hasSafetyProfile && hasSafetyRevision;
     const hasAuthor = tableHasColumn(db, "messages", "author_id");
 
     const channelRows = db.exec(

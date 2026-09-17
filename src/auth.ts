@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createPublicKey, verify, randomBytes, timingSafeEqual, type KeyObject } from "node:crypto";
 import { tokenDigest } from "./crypto-at-rest.js";
 import {
   store,
@@ -23,11 +23,41 @@ function safeEqualStr(a: string, b: string): boolean {
   return timingSafeEqual(ba, bb);
 }
 
+/** Parse only the accepted public-key representation. DER is the canonical
+ * identity material; PEM whitespace and line wrapping are transport details. */
+function ed25519PublicKey(pem: string): KeyObject {
+  const key = createPublicKey(normalizePem(pem));
+  const jwk = key.export({ format: "jwk" }) as { kty?: string; crv?: string };
+  if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519") {
+    throw new Error("expected Ed25519 public key");
+  }
+  return key;
+}
+
+function canonicalSpkiDer(pem: string): Buffer {
+  return Buffer.from(ed25519PublicKey(pem).export({ type: "spki", format: "der" }));
+}
+
+/** Canonical PEM for new writes. Existing persisted PEM remains readable because
+ * all equality and identity operations parse its canonical SPKI DER. */
+export function canonicalEd25519PublicPem(pem: string): string {
+  return ed25519PublicKey(pem).export({ type: "spki", format: "pem" }).toString();
+}
+
+export function equalEd25519PublicKeys(left: string, right: string): boolean {
+  try {
+    const a = canonicalSpkiDer(left);
+    const b = canonicalSpkiDer(right);
+    return a.length === b.length && timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 export function isValidEd25519PublicPem(pem: string): boolean {
   try {
-    const key = createPublicKey(normalizePem(pem));
-    const jwk = key.export({ format: "jwk" }) as { kty?: string; crv?: string };
-    return jwk.kty === "OKP" && jwk.crv === "Ed25519";
+    ed25519PublicKey(pem);
+    return true;
   } catch {
     return false;
   }
@@ -39,7 +69,7 @@ export function verifyEd25519Signature(
   signatureBase64: string
 ): boolean {
   try {
-    const key = createPublicKey(normalizePem(publicKeyPem));
+    const key = ed25519PublicKey(publicKeyPem);
     const sig = Buffer.from(signatureBase64, "base64");
     const data = Buffer.from(challengeUtf8, "utf8");
     return verify(null, data, key, sig);
@@ -87,7 +117,7 @@ export function createChallenge(
   store.challenges.set(challenge, {
     challenge,
     channelId,
-    publicKeyPem: normalizePem(publicKeyPem),
+    publicKeyPem: canonicalEd25519PublicPem(publicKeyPem),
     expiresAt,
   });
   store.markDirty();
@@ -107,7 +137,7 @@ export function consumeChallenge(
     return false;
   }
   if (!safeEqualStr(rec.channelId, channelId)) return false;
-  if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
+  if (!equalEd25519PublicKeys(rec.publicKeyPem, publicKeyPem)) return false;
   store.challenges.delete(challenge);
   store.markDirty();
   return true;
@@ -137,7 +167,7 @@ export function mintAgentToken(publicKeyPem: string, now = Date.now()): MintedAg
   const token = randomBytes(32).toString("base64url");
   const rec: AgentTokenRecord = {
     tokenHash: tokenDigest(token),
-    publicKeyPem: normalizePem(publicKeyPem),
+    publicKeyPem: canonicalEd25519PublicPem(publicKeyPem),
     expiresAt: now + TOKEN_TTL_MS,
   };
   store.agentTokens.set(rec.tokenHash, rec);
@@ -153,7 +183,7 @@ export function createAgentChallenge(
   const expiresAt = now + CHALLENGE_TTL_MS;
   store.agentChallenges.set(challenge, {
     challenge,
-    publicKeyPem: normalizePem(publicKeyPem),
+    publicKeyPem: canonicalEd25519PublicPem(publicKeyPem),
     expiresAt,
   });
   store.markDirty();
@@ -168,7 +198,7 @@ export function consumeAgentChallenge(challenge: string, publicKeyPem: string): 
     store.markDirty();
     return false;
   }
-  if (!safeEqualStr(normalizePem(rec.publicKeyPem), normalizePem(publicKeyPem))) return false;
+  if (!equalEd25519PublicKeys(rec.publicKeyPem, publicKeyPem)) return false;
   store.agentChallenges.delete(challenge);
   store.markDirty();
   return true;
@@ -194,13 +224,13 @@ export function resolveAgentBearer(authHeader: string | undefined): AgentTokenRe
 }
 
 export function pemFingerprint(pem: string): string {
-  return normalizePem(pem);
+  return canonicalSpkiDer(pem).toString("base64url");
 }
 
 /** Stable opaque moderation identity. It is derived from the normalized public
  * key rather than a seat or nickname, so it survives bearer refresh and rejoin. */
 export function publicKeyIdentity(pem: string): string {
-  return `ed25519:${createHash("sha256").update(normalizePem(pem)).digest("base64url")}`;
+  return `ed25519:${createHash("sha256").update(canonicalSpkiDer(pem)).digest("base64url")}`;
 }
 
 export function isPublicKeyIdentity(value: unknown): value is string {

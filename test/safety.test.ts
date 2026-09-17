@@ -13,6 +13,12 @@ import { bearer, ed25519PemPair, freshStore, joinWithProof, json, postJson } fro
 const governed = { id: "store-v1", revision: 1 };
 const terms = "store-v1.1";
 
+function rewrapPem(pem: string): string {
+  const body = pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g, "");
+  const lines = body.match(/.{1,17}/g) ?? [];
+  return `-----BEGIN PUBLIC KEY-----\r\n${lines.join("\r\n")}\r\n-----END PUBLIC KEY-----\r\n`;
+}
+
 describe("store-v1 safety contract", () => {
   let previousKey: string | undefined;
   let previousScannerRules: string | undefined;
@@ -113,6 +119,13 @@ describe("store-v1 safety contract", () => {
 
     const blocked = await json(app, `/v1/channels/${id}/blocks`, postJson({ author_id: authorId }, bearer(created.body.token as string)));
     assert.equal(blocked.status, 200);
+    const unauthenticatedBlocks = await json(app, `/v1/channels/${id}/blocks`);
+    assert.equal(unauthenticatedBlocks.status, 401);
+    const persistedBlocks = await json(app, `/v1/channels/${id}/blocks`, { headers: bearer(created.body.token as string) });
+    assert.equal(persistedBlocks.status, 200);
+    assert.equal(persistedBlocks.body.blocks.length, 1);
+    assert.equal(persistedBlocks.body.blocks[0].author_id, authorId);
+    assert.ok(Date.parse(persistedBlocks.body.blocks[0].created_at));
     const hidden = await json(app, `/v1/channels/${id}/messages?after=0`, { headers: bearer(created.body.token as string) });
     assert.equal(hidden.status, 200);
     assert.deepEqual(hidden.body.messages, []);
@@ -122,6 +135,8 @@ describe("store-v1 safety contract", () => {
 
     const rejoined = await joinWithProof(app, id, a, { accepted_terms_version: terms });
     assert.equal(rejoined.status, 200);
+    const blocksAfterRejoin = await json(app, `/v1/channels/${id}/blocks`, { headers: bearer(rejoined.body.token as string) });
+    assert.equal(blocksAfterRejoin.body.blocks[0].author_id, authorId);
     const stillHidden = await json(app, `/v1/channels/${id}/messages?after=0`, { headers: bearer(rejoined.body.token as string) });
     assert.deepEqual(stillHidden.body.messages, []);
 
@@ -130,6 +145,48 @@ describe("store-v1 safety contract", () => {
     assert.equal(rejected.body.error, "content_rejected");
     assert.equal(store.channels.get(id)!.messages.length, 1);
     assert.equal(store.channels.get(id)!.nextMsgSeq, 2);
+  });
+
+  it("uses canonical Ed25519 SPKI identity across PEM wrapping for seats, blocks, and bans", async () => {
+    process.env.MODERATION_TOKEN = "test-moderator";
+    const app = createApp();
+    const a = ed25519PemPair();
+    const b = ed25519PemPair();
+    const wrappedB = { ...b, publicPem: rewrapPem(b.publicPem) };
+    const created = await json(app, "/v1/channels", postJson({
+      public_key_pem: a.publicPem,
+      safety_profile: governed,
+      accepted_terms_version: terms,
+    }));
+    const id = created.body.channel_id as string;
+    const joined = await json(app, `/v1/channels/${id}/join`, postJson({
+      public_key_pem: b.publicPem,
+      accepted_terms_version: terms,
+    }));
+    const sent = await json(app, `/v1/channels/${id}/messages`, postJson({ body: "same key" }, bearer(joined.body.token as string)));
+    const authorId = sent.body.message.author_id as string;
+    await json(app, `/v1/channels/${id}/blocks`, postJson({ author_id: authorId }, bearer(created.body.token as string)));
+
+    const withoutProof = await json(app, `/v1/channels/${id}/join`, postJson({
+      public_key_pem: wrappedB.publicPem,
+      accepted_terms_version: terms,
+    }));
+    assert.equal(withoutProof.status, 401);
+    assert.equal(withoutProof.body.error, "proof_required");
+    const rebound = await joinWithProof(app, id, wrappedB, { accepted_terms_version: terms });
+    assert.equal(rebound.status, 200);
+    assert.equal(rebound.body.seat, "2");
+    const hidden = await json(app, `/v1/channels/${id}/messages?after=0`, { headers: bearer(created.body.token as string) });
+    assert.deepEqual(hidden.body.messages, []);
+
+    const ban = await json(app, "/v1/moderation/bans", postJson({
+      scope: "global",
+      author_id: authorId,
+    }, bearer("test-moderator")));
+    assert.equal(ban.status, 200);
+    const bannedRejoin = await joinWithProof(app, id, wrappedB, { accepted_terms_version: terms });
+    assert.equal(bannedRejoin.status, 403);
+    assert.equal(bannedRejoin.body.error, "participant_banned");
   });
 
   it("persists encrypted report evidence independently of the room and restricts moderator actions", async () => {

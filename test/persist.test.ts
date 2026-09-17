@@ -19,6 +19,7 @@ import {
   flushStore,
   loadStore,
   resolveDataDir,
+  StoreIntegrityError,
 } from "../src/persist.js";
 import {
   decryptUtf8,
@@ -216,7 +217,49 @@ describe("SQLite persistence", () => {
     const ch = store.channels.get(channelId);
     assert.ok(ch);
     assert.equal(ch!.encrypted, false);
+    assert.deepEqual(ch!.safety, { id: "unrestricted", revision: 1 });
     assert.equal(ch!.messages[0].body, "plain hi");
+  });
+
+  it("fails closed for a present malformed JSON safety profile", async () => {
+    const now = Date.now();
+    const disk = {
+      version: 1,
+      channels: [{
+        id: "111-222-333",
+        createdAt: now,
+        absoluteExpiresAt: now + 3600_000,
+        idleExpiresAt: now + 3600_000,
+        idleTtlMs: 3600_000,
+        maxSeats: 2,
+        safety: { id: "store-v2", revision: 1 },
+        seats: {},
+        messages: [],
+        nextMsgSeq: 1,
+        files: {},
+      }],
+      tokens: [],
+      challenges: [],
+      agentTokens: [],
+      agentChallenges: [],
+      usedChannelIds: [],
+    };
+    writeFileSync(join(dataDir, "store.json"), JSON.stringify(disk), "utf8");
+    await assert.rejects(loadStore(store), StoreIntegrityError);
+  });
+
+  it("fails closed for a present unsupported SQLite safety profile", async () => {
+    const app = createApp();
+    const created = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key_pem: ed25519PemPair().publicPem }),
+    });
+    assert.equal(created.status, 200);
+    await flushStore(store);
+    await editStoreFile("UPDATE channels SET safety_profile = 'store-v999', safety_revision = 1");
+    freshStore();
+    await assert.rejects(loadStore(store), StoreIntegrityError);
   });
 
   it("encrypted:true without STORE_ENCRYPTION_KEY → 503 encryption_unavailable", async () => {

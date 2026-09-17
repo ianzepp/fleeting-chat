@@ -60,7 +60,7 @@ Every reserve/create/join response and unauthenticated `GET /v1/channels/CHANNEL
 
 Governed `POST /v1/channels` and `POST …/join` require `accepted_terms_version: "store-v1.1"`; otherwise the server returns 428 `terms_not_accepted`. The profile cannot be changed after creation.
 
-In a governed room, block a stable `author_id` with `POST /v1/channels/CHANNEL_ID/blocks` body `{ "author_id": "ed25519:…" }`, or unblock with `DELETE /v1/channels/CHANNEL_ID/blocks/AUTHOR_ID`. Blocks are directional and enforced during reads and long polls. Report a retained message with `POST /v1/channels/CHANNEL_ID/reports` body `{ "message_id": "m1", "reason": "…" }`. Reports preserve encrypted message evidence for `REPORT_RETENTION_SECONDS` (default seven days; maximum 30 days) even if the room expires.
+In a governed room, block a stable `author_id` with `POST /v1/channels/CHANNEL_ID/blocks` body `{ "author_id": "ed25519:…" }`, recover the caller's durable block inventory with authenticated `GET /v1/channels/CHANNEL_ID/blocks` → `{ "blocks": [{ "author_id", "created_at" }] }`, or unblock with `DELETE /v1/channels/CHANNEL_ID/blocks/AUTHOR_ID`. Blocks are directional and enforced during reads and long polls. Report a retained message with `POST /v1/channels/CHANNEL_ID/reports` body `{ "message_id": "m1", "reason": "…" }`. Reports preserve encrypted message evidence for `REPORT_RETENTION_SECONDS` (default seven days; maximum 30 days) even if the room expires.
 
 Operator-only routes use `Authorization: Bearer $MODERATION_TOKEN`: `GET /v1/moderation/reports`, `POST /v1/moderation/reports/REPORT_ID/resolve|dismiss`, `POST /v1/moderation/bans`, and `DELETE /v1/moderation/bans/BAN_ID`. Participant and agent bearers never grant moderator authority.
 
@@ -384,7 +384,7 @@ Errors: 404 `file_not_found` (missing/expired), 413 `file_too_large`, 409 `file_
 - POST `/v1/channels/:id/extend` → channel bearer (any bound seat); `{ extend_by_seconds }` → reserve-shaped expiry fields (clamped to createdAt+30d)
 - POST `/v1/channels/:id/expand` → channel bearer (any bound seat); `{ expand_by }` → raise `max_seats` ceiling (clamped to 8; response includes `occupied`)
 - GET `/v1/channels/:id/preflight` → no-bind safety advertisement
-- POST/DELETE `/v1/channels/:id/blocks` → governed directional block/unblock
+- GET/POST/DELETE `/v1/channels/:id/blocks` → governed directional block inventory/block/unblock
 - POST `/v1/channels/:id/reports` → governed report with encrypted retained evidence
 - GET/POST/DELETE `/v1/moderation/...` → configured operator credential only
 

@@ -39,7 +39,6 @@ import {
   type Waiter,
 } from "./store.js";
 import {
-  normalizePem,
   isValidEd25519PublicPem,
   verifyEd25519Signature,
   mintToken,
@@ -54,6 +53,8 @@ import {
   publicKeyIdentity,
   isPublicKeyIdentity,
   moderatorAuthorized,
+  canonicalEd25519PublicPem,
+  equalEd25519PublicKeys,
 } from "./auth.js";
 import { generateChannelId } from "./ids.js";
 import { encryptionAvailable } from "./crypto-at-rest.js";
@@ -1161,9 +1162,8 @@ async function readOptionalJsonBody<T>(
 }
 
 function seatForPubkey(ch: Channel, pem: string): Seat | null {
-  const n = normalizePem(pem);
   for (const seat of assignSeats(ch.maxSeats)) {
-    if (ch.seats[seat] && normalizePem(ch.seats[seat]!.publicKeyPem) === n) return seat;
+    if (ch.seats[seat] && equalEd25519PublicKeys(ch.seats[seat]!.publicKeyPem, pem)) return seat;
   }
   return null;
 }
@@ -1678,7 +1678,7 @@ export function createApp(): Hono {
     } catch {
       return jsonError(c, 503, "channel_id_exhausted");
     }
-    const pem = normalizePem(body.public_key_pem);
+    const pem = canonicalEd25519PublicPem(body.public_key_pem);
     const seat1: Channel["seats"]["1"] = {
       publicKeyPem: pem,
       rateWindowStart: now,
@@ -1754,7 +1754,7 @@ export function createApp(): Hono {
     }
     const nickParsed = parseNick(body.nick);
     if (!nickParsed.ok) return jsonError(c, 400, "invalid_nick");
-    const pem = normalizePem(body.public_key_pem);
+    const pem = canonicalEd25519PublicPem(body.public_key_pem);
     const identity = publicKeyIdentity(pem);
     if (store.isBanned(ch.id, identity)) return jsonError(c, 403, "participant_banned");
     const existing = seatForPubkey(ch, pem);
@@ -2065,7 +2065,7 @@ export function createApp(): Hono {
       return jsonError(c, 400, "invalid_since");
     }
 
-    const pem = normalizePem(agentTok.publicKeyPem);
+    const pem = agentTok.publicKeyPem;
     const hits: string[] = [];
 
     for (const [id, ch] of store.channels) {
@@ -2076,7 +2076,7 @@ export function createApp(): Hono {
       let holdsSeat = false;
       for (const seat of assignSeats(ch.maxSeats)) {
         const s = ch.seats[seat];
-        if (s && normalizePem(s.publicKeyPem) === pem) {
+        if (s && equalEd25519PublicKeys(s.publicKeyPem, pem)) {
           holdsSeat = true;
           break;
         }
@@ -2244,6 +2244,28 @@ export function createApp(): Hono {
     store.markDirty();
     setApiSecurityHeaders(c);
     return c.json({ author_id: blockedId, blocked: true });
+  });
+
+  /** Reconnect recovery: participants can rebuild their own durable block list. */
+  app.get("/v1/channels/:id/blocks", (c) => {
+    const id = normalizeChannelId(c.req.param("id"));
+    if (!id) return jsonError(c, 400, "invalid_channel_id");
+    const tok = resolveBearer(c.req.header("Authorization"));
+    if (!tok || tok.channelId !== id) return jsonError(c, 401, "unauthorized");
+    const ch = store.getChannel(id);
+    if (!ch) return jsonError(c, 404, "channel_not_found");
+    const blockerId = channelIdentity(ch, tok.seat);
+    if (!blockerId) return jsonError(c, 403, "participant_banned");
+    if (ch.safety.id !== "store-v1") return jsonError(c, 409, "safety_feature_unavailable");
+    const blocks = [...store.blocks.values()]
+      .filter((block) => block.channelId === id && block.blockerId === blockerId)
+      .sort((left, right) => left.createdAt - right.createdAt || left.blockedId.localeCompare(right.blockedId))
+      .map((block) => ({
+        author_id: block.blockedId,
+        created_at: new Date(block.createdAt).toISOString(),
+      }));
+    setApiSecurityHeaders(c);
+    return c.json({ blocks });
   });
 
   app.delete("/v1/channels/:id/blocks/:author_id", (c) => {
