@@ -243,3 +243,25 @@ No question blocks local implementation. The following remain explicit release g
 - Deployment sequence and backward-compatible rollout across public clients.
 
 This factory run does not resolve legal compliance by code alone and does not claim App Store or Play approval.
+
+## Execution Record
+
+Status: implementation complete; production rollout and store submission remain deferred.
+
+Completed on 2026-09-16:
+
+- S1-S4: server profile admission, pre-storage scanning, canonical public-key identity, directional blocks and recovery inventory, retained encrypted reports, separate moderator authority, persistence, migration, and public API documentation.
+- I1-I2: iOS fail-closed preflight and terms acceptance, governed mint/join, report/block/unblock actions, authoritative block recovery, rejected-draft retention, and stale-poll protection.
+- G1: TypeScript typecheck, 98 server tests, 50 iOS tests, unsigned iOS Release build, field/error/path comparison, and local two-identity governed-room integration coverage in `test/safety.test.ts`.
+
+Implementation commits:
+
+- `f28d6e6` — Add store-governed room safety.
+- `3e8e8c6` — Close governed safety audit findings.
+- iOS `5b715c8` — Require governed safety for iOS rooms.
+- iOS `5a9e89d` — Make block recovery authoritative.
+- iOS `36c7e6a` — Stop retrying terminal safety failures.
+
+Independent frozen-range audits initially found canonical-key, persisted-profile downgrade, durable-unblock, stale-poll, and terminal-retry defects. Each received a regression test and a follow-up commit. Final server and iOS audits returned `clean_pass` with no P0-P2 findings.
+
+No deployment, production configuration, production moderation action, external test, or store submission occurred. Production scanner ownership/rules, moderator-secret operations, final legal/support documents, retention policy approval, live rollout, physical-device testing, and store-console work remain release gates.
