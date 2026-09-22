@@ -52,7 +52,25 @@ In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RA
 
 Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to keep plaintext on disk. Bearer tokens are never written to disk in usable form: the store keeps a SHA-256 digest of each one, and the `fleeting.sqlite` file is written `0600`.
 
-The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different on the next boot, the process logs why and **exits instead of starting** — serving an empty store would overwrite the encrypted rows. There is no key rotation path: changing the key means re-encrypting the store, not just changing the variable.
+The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different on the next boot, the process logs why and **exits instead of starting** — serving an empty store would overwrite the encrypted rows. There is no key rotation path: changing the key means re-encrypting the store, not just changing the variable. Do not rotate or remove `STORE_ENCRYPTION_KEY` as part of hive work.
+
+### Hive / Swarm SES (optional)
+
+Feature-flagged dual-write of channel **create** and message **send** onto the Swarm hive SES surface (inboxes / threads / messages). Reads stay on the local Store/SQLite. Production default is **off**. This slice does not cut over DNS or remove `/data`.
+
+| Variable | Meaning |
+| --- | --- |
+| `HIVE_BACKEND` | `off` (default), `shadow`, or `on`. Prod is currently `off`. `shadow` and `on` dual-write after local success; the public HTTP contract is still served from SQLite. |
+| `HIVE_GATEWAY_URL` | Hive gateway origin (no trailing slash). |
+| `HIVE_TENANT_SLUG` | Tenant slug (e.g. `fleeting`). |
+| `HIVE_TENANT_ID` | Tenant UUID. |
+| `HIVE_MACHINE_KEY_ID` | Machine key id for swarm key-challenge auth. |
+| `HIVE_MACHINE_PRIVATE_KEY_PEM` | Ed25519 PKCS8 PEM. Auth is `POST /auth/challenge` → sign nonce → `POST /auth/verify`; the bearer is cached in memory only. There is no `HIVE_MACHINE_TOKEN`. |
+| `HIVE_SES_INBOX_ID` | Optional. If unset, the process creates or reuses a named inbox (`fleeting-shadow`) and caches the id in memory — never on disk. |
+
+If `HIVE_BACKEND` is `shadow` or `on` and the gateway URL or key-challenge material is missing, hive writes **fail closed** (logged) and the public create/send path still succeeds from SQLite. Encrypted channels never put a plaintext body on SES (`body_encoding=omitted_encrypted`, `body=null`).
+
+`GET /v1/_hive/health` is operator-only: it uses the same `MODERATION_TOKEN` bearer as `/v1/moderation/*` (`403 moderator_unauthorized` without it) and then reports backend mode and gateway reachability. Anonymous callers do not get mode, fail-closed, or reachability details. `GET /healthz` stays `ok` even when hive is down. Auth material is env-only — do not commit PEM or tokens.
 
 ## Store-governed rooms
 
@@ -80,7 +98,7 @@ docker run --rm -p 8787:8787 -e PORT=8787 \
   -e STORE_ENCRYPTION_KEY=$(openssl rand -base64 32) fleeting-chat
 ```
 
-Production today: Railway + volume at `/data`, custom domain `fleeting.chat`.
+Production today: Railway + volume at `/data`, custom domain `fleeting.chat`. Hive dual-write (`HIVE_BACKEND`) stays **off** in prod until a later cutover; see Persistence above for the `HIVE_*` variables. Do not rotate `STORE_ENCRYPTION_KEY` for hive work.
 
 ## Source
 

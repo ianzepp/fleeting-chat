@@ -67,6 +67,7 @@ import {
   scanStoreV1Message,
   termsAccepted,
 } from "./safety.js";
+import { hiveHealth, shadowChannelCreated, shadowMessageSent } from "./hive/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -1471,6 +1472,15 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
+  /** Operator-only reachability. Same moderator gate as /v1/moderation/*. */
+  app.get("/v1/_hive/health", async (c) => {
+    if (!moderatorAuthorized(c.req.header("Authorization"))) {
+      return jsonError(c, 403, "moderator_unauthorized");
+    }
+    setApiSecurityHeaders(c);
+    return c.json(await hiveHealth());
+  });
+
   const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#f7f4ef"/><text x="16" y="22" text-anchor="middle" font-family="ui-serif, Georgia, serif" font-size="16" fill="#2e2a26">f</text></svg>`;
 
   app.get("/robots.txt", (c) => {
@@ -1608,6 +1618,11 @@ export function createApp(): Hono {
     };
     store.channels.set(id, ch);
     store.markDirty();
+    shadowChannelCreated({
+      channelId: id,
+      createdAt: new Date(now).toISOString(),
+      encrypted: ch.encrypted,
+    });
     setApiSecurityHeaders(c);
     return c.json({
       channel_id: id,
@@ -1703,6 +1718,12 @@ export function createApp(): Hono {
     store.channels.set(id, ch);
     store.markDirty();
     const tok = mintToken(id, "1", now);
+    shadowChannelCreated({
+      channelId: id,
+      createdAt: new Date(now).toISOString(),
+      encrypted: ch.encrypted,
+      seat: "1",
+    });
     setApiSecurityHeaders(c);
     const resp: Record<string, unknown> = {
       channel_id: id,
@@ -2139,6 +2160,14 @@ export function createApp(): Hono {
 
     store.touchIdle(ch);
     const msg = appendMessage(ch, tok.seat, body.body);
+    shadowMessageSent({
+      channelId: id,
+      messageId: msg.id,
+      seat: tok.seat,
+      createdAt: msg.ts,
+      encrypted: ch.encrypted,
+      body: body.body,
+    });
     setApiSecurityHeaders(c);
     return c.json({ message: messagePayload(msg) }, 201);
   });
