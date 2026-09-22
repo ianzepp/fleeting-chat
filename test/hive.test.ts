@@ -115,6 +115,9 @@ function mockHive(opts: {
       assert.equal(raw?.display_name, HIVE_INBOX_NAME);
       assert.equal(raw?.purpose, HIVE_INBOX_NAME);
       assert.equal(raw?.name, undefined);
+      assert.equal(raw?.role, undefined, "do not send role; agent-ish role requires owner_user_id");
+      assert.equal(raw?.owner_user_id, undefined, "do not invent owner_user_id");
+      assert.match(String(raw?.purpose), /^(?!agent\b)/i);
       return jsonRes(200, {
         inbox_id: inboxId,
         email: raw?.email,
@@ -282,6 +285,8 @@ describe("hive client", () => {
     assert.equal(create.body?.email, "fleeting-shadow@fleeting.swarm");
     assert.equal(create.body?.display_name, "fleeting-shadow");
     assert.equal(create.body?.purpose, "fleeting-shadow");
+    assert.equal(create.body?.role, undefined);
+    assert.equal(create.body?.owner_user_id, undefined);
   });
 
   it("matches an existing inbox by local_part or email, not only name", async () => {
