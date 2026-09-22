@@ -1,0 +1,498 @@
+/** Hive SES shadow client: key-challenge auth, fail-closed config, envelope rules. */
+
+import { afterEach, beforeEach, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
+import { createApp } from "../src/app.js";
+import {
+  HiveClient,
+  buildShadowEnvelope,
+  hiveHealth,
+  loadHiveConfig,
+  parseHiveBackendMode,
+  resetHiveClientForTests,
+  shadowChannelCreated,
+  waitForHiveShadow,
+} from "../src/hive/index.js";
+import { decodeNonceBytes, jwtExpiryMs, signNonce } from "../src/hive/auth.js";
+import { bearer, ed25519PemPair, freshStore, json, postJson } from "./support.js";
+
+function machinePemPair() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return {
+    publicPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+    privatePem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    publicKey,
+  };
+}
+
+function fakeJwt(expSecondsFromNow: number): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expSecondsFromNow })
+  ).toString("base64url");
+  return `${header}.${payload}.sig`;
+}
+
+interface RecordedCall {
+  method: string;
+  path: string;
+  body: Record<string, unknown> | null;
+  auth?: string;
+}
+
+function hiveEnv(privatePem: string): NodeJS.ProcessEnv {
+  return {
+    HIVE_BACKEND: "shadow",
+    HIVE_GATEWAY_URL: "https://hive.test",
+    HIVE_TENANT_SLUG: "fleeting",
+    HIVE_TENANT_ID: "00000000-0000-4000-8000-000000000001",
+    HIVE_MACHINE_KEY_ID: "00000000-0000-4000-8000-000000000002",
+    HIVE_MACHINE_PRIVATE_KEY_PEM: privatePem,
+  };
+}
+
+function mockHive(opts: {
+  publicPem: string;
+  privatePem: string;
+  inboxId?: string;
+  existingInboxes?: Array<Record<string, unknown>>;
+  sendResult?: Record<string, unknown>;
+  failSend?: boolean;
+  jwtTtlSec?: number;
+}): { client: HiveClient; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  const issuedNonces = new Map<string, string>();
+  const inboxId = opts.inboxId ?? "inbox-shadow";
+  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+    const url = new URL(input);
+    const path = url.pathname;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const raw = init?.body == null ? null : JSON.parse(String(init.body));
+    const auth = new Headers(init?.headers).get("Authorization") ?? undefined;
+    calls.push({ method, path, body: raw, auth });
+
+    if (method === "GET" && path === "/healthz") {
+      return jsonRes(200, { success: true, data: { status: "healthy" } });
+    }
+    if (method === "POST" && path === "/auth/challenge") {
+      assert.equal(raw?.tenant, "fleeting");
+      assert.equal(raw?.key_id, "00000000-0000-4000-8000-000000000002");
+      const nonce = randomBytes(32).toString("base64url");
+      const challengeId = `ch-${calls.length}`;
+      issuedNonces.set(challengeId, nonce);
+      return jsonRes(200, {
+        algorithm: "ed25519",
+        challenge_id: challengeId,
+        expires_in: 300,
+        nonce,
+      });
+    }
+    if (method === "POST" && path === "/auth/verify") {
+      assert.equal(raw?.tenant, "fleeting");
+      assert.equal(typeof raw?.challenge_id, "string");
+      assert.equal(typeof raw?.signature, "string");
+      const nonce = issuedNonces.get(String(raw.challenge_id));
+      assert.ok(nonce, "verify must reference a live challenge nonce");
+      const nonceBytes = decodeNonceBytes(nonce);
+      const sig = Buffer.from(String(raw.signature), "base64url");
+      assert.equal(String(raw.signature).includes("="), false, "signature must be unpadded base64url");
+      const pub = createPublicKey(opts.publicPem);
+      assert.equal(verify(null, nonceBytes, pub, sig), true, "nonce signature must verify");
+      return jsonRes(200, { token: fakeJwt(opts.jwtTtlSec ?? 86_400) });
+    }
+    if (method === "POST" && path === "/ses/provision") {
+      return jsonRes(200, { ok: true });
+    }
+    if (method === "GET" && path === "/ses/inboxes") {
+      return jsonRes(200, { inboxes: opts.existingInboxes ?? [] });
+    }
+    if (method === "POST" && path === "/ses/inboxes") {
+      return jsonRes(200, { id: inboxId, name: raw?.name });
+    }
+    if (method === "POST" && path.endsWith("/messages/send")) {
+      if (opts.failSend) return jsonRes(503, { error: { code: "UNAVAILABLE", message: "ses down" } });
+      return jsonRes(200, opts.sendResult ?? { thread_id: "thread-1", id: "msg-1" });
+    }
+    return jsonRes(404, { error: { code: "NOT_FOUND", message: path } });
+  };
+  const client = new HiveClient({
+    fetch: fetchImpl,
+    config: () => loadHiveConfig(hiveEnv(opts.privatePem)),
+  });
+  return { client, calls };
+}
+
+function jsonRes(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("hive config", () => {
+  it("defaults to off", () => {
+    const cfg = loadHiveConfig({});
+    assert.equal(cfg.mode, "off");
+    assert.equal(cfg.enabled, false);
+    assert.equal(cfg.failClosed, false);
+    assert.equal(parseHiveBackendMode(undefined), "off");
+    assert.equal(parseHiveBackendMode("OFF"), "off");
+  });
+
+  it("fails closed in shadow/on when gateway or key material is missing", () => {
+    const shadow = loadHiveConfig({ HIVE_BACKEND: "shadow" });
+    assert.equal(shadow.mode, "shadow");
+    assert.equal(shadow.enabled, false);
+    assert.equal(shadow.failClosed, true);
+    assert.ok(shadow.missing.includes("HIVE_GATEWAY_URL"));
+    assert.ok(shadow.missing.includes("HIVE_MACHINE_PRIVATE_KEY_PEM"));
+    assert.equal(shadow.missing.includes("HIVE_MACHINE_TOKEN"), false);
+
+    const on = loadHiveConfig({
+      HIVE_BACKEND: "on",
+      HIVE_GATEWAY_URL: "https://hive.test",
+      HIVE_TENANT_SLUG: "fleeting",
+    });
+    assert.equal(on.failClosed, true);
+    assert.ok(on.missing.includes("HIVE_MACHINE_KEY_ID"));
+  });
+
+  it("enables when key-challenge env is complete", () => {
+    const pair = machinePemPair();
+    const cfg = loadHiveConfig(hiveEnv(pair.privatePem));
+    assert.equal(cfg.enabled, true);
+    assert.equal(cfg.failClosed, false);
+    assert.equal(cfg.tenantSlug, "fleeting");
+    assert.match(cfg.machinePrivateKeyPem, /BEGIN PRIVATE KEY/);
+  });
+});
+
+describe("hive shadow envelope", () => {
+  it("omits the body for encrypted channels", () => {
+    const env = buildShadowEnvelope({
+      event: "message.send",
+      channelId: "111-222-333",
+      messageId: "m1",
+      seat: "1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      encrypted: true,
+      body: "secret plaintext",
+    });
+    assert.equal(env.kind, "fleeting.v1.shadow");
+    assert.equal(env.body_encoding, "omitted_encrypted");
+    assert.equal(env.body, null);
+  });
+
+  it("keeps plaintext body on unencrypted channels", () => {
+    const env = buildShadowEnvelope({
+      event: "message.send",
+      channelId: "111-222-333",
+      messageId: "m1",
+      seat: "2",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      encrypted: false,
+      body: "hello",
+    });
+    assert.equal(env.body_encoding, "plaintext");
+    assert.equal(env.body, "hello");
+  });
+});
+
+describe("hive client", () => {
+  it("skips all network when backend is off", async () => {
+    let fetches = 0;
+    const client = new HiveClient({
+      fetch: async () => {
+        fetches += 1;
+        return jsonRes(500, {});
+      },
+      config: () => loadHiveConfig({ HIVE_BACKEND: "off", HIVE_GATEWAY_URL: "https://hive.test" }),
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "111-222-333",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    assert.equal(fetches, 0);
+  });
+
+  it("skips network when shadow is fail-closed", async () => {
+    let fetches = 0;
+    const client = new HiveClient({
+      fetch: async () => {
+        fetches += 1;
+        return jsonRes(500, {});
+      },
+      config: () => loadHiveConfig({ HIVE_BACKEND: "shadow" }),
+    });
+    await client.sendShadowEvent({
+      event: "message.send",
+      channelId: "111-222-333",
+      messageId: "m1",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+      body: "x",
+    });
+    assert.equal(fetches, 0);
+  });
+
+  it("challenge-verifies, creates an inbox, and sends a create envelope", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive(pair);
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "482-019-773",
+      seat: "1",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+    });
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.ok(send);
+    assert.equal(send.method, "POST");
+    assert.equal(send.path, "/ses/inboxes/inbox-shadow/messages/send");
+    assert.match(send.auth ?? "", /^Bearer /);
+    assert.equal(send.body?.subject, "482-019-773");
+    const text = JSON.parse(String(send.body?.text));
+    assert.equal(text.kind, "fleeting.v1.shadow");
+    assert.equal(text.event, "channel.create");
+    assert.equal(text.channel_id, "482-019-773");
+    assert.equal(text.body_encoding, "plaintext");
+    assert.equal(text.body, null);
+    assert.ok(calls.some((c) => c.path === "/auth/challenge"));
+    assert.ok(calls.some((c) => c.path === "/auth/verify"));
+    assert.ok(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"));
+  });
+
+  it("reuses a cached bearer and a per-channel thread_id", async () => {
+    const pair = machinePemPair();
+    const mocked = mockHive({ ...pair, sendResult: { thread_id: "thr-9" } });
+    await mocked.client.sendShadowEvent({
+      event: "message.send",
+      channelId: "100-200-300",
+      messageId: "m1",
+      seat: "1",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+      body: "one",
+    });
+    await mocked.client.sendShadowEvent({
+      event: "message.send",
+      channelId: "100-200-300",
+      messageId: "m2",
+      seat: "1",
+      createdAt: "2026-01-02T00:00:01.000Z",
+      encrypted: false,
+      body: "two",
+    });
+    const verifies = mocked.calls.filter((c) => c.path === "/auth/verify");
+    assert.equal(verifies.length, 1);
+    const sends = mocked.calls.filter((c) => c.path.includes("/messages/send"));
+    assert.equal(sends.length, 2);
+    assert.equal(sends[0]?.body?.thread_id, undefined);
+    assert.equal(sends[1]?.body?.thread_id, "thr-9");
+    const second = JSON.parse(String(sends[1]?.body?.text));
+    assert.equal(second.body, "two");
+    assert.equal(second.message_id, "m2");
+  });
+
+  it("never puts plaintext on SES for encrypted message.send", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive(pair);
+    await client.sendShadowEvent({
+      event: "message.send",
+      channelId: "100-200-300",
+      messageId: "m9",
+      seat: "2",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: true,
+      body: "do-not-leak",
+    });
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    const text = JSON.parse(String(send?.body?.text));
+    assert.equal(text.body_encoding, "omitted_encrypted");
+    assert.equal(text.body, null);
+    assert.equal(JSON.stringify(send?.body).includes("do-not-leak"), false);
+  });
+
+  it("uses HIVE_SES_INBOX_ID without creating an inbox", async () => {
+    const pair = machinePemPair();
+    const env = { ...hiveEnv(pair.privatePem), HIVE_SES_INBOX_ID: "preset-inbox" };
+    const calls: RecordedCall[] = [];
+    const client = new HiveClient({
+      config: () => loadHiveConfig(env),
+      fetch: async (input, init) => {
+        const path = new URL(input).pathname;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const raw = init?.body == null ? null : JSON.parse(String(init.body));
+        calls.push({ method, path, body: raw });
+        if (path === "/auth/challenge") {
+          return jsonRes(200, { challenge_id: "c1", nonce: randomBytes(32).toString("base64url") });
+        }
+        if (path === "/auth/verify") return jsonRes(200, { token: fakeJwt(86_400) });
+        if (path.includes("/messages/send")) return jsonRes(200, { thread_id: "t" });
+        return jsonRes(404, {});
+      },
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "100-200-300",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes"), false);
+    assert.ok(calls.some((c) => c.path === "/ses/inboxes/preset-inbox/messages/send"));
+  });
+
+  it("refreshes the bearer before JWT expiry", async () => {
+    const pair = machinePemPair();
+    const mocked = mockHive(pair);
+    await mocked.client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "100-200-300",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    assert.equal(mocked.calls.filter((c) => c.path === "/auth/verify").length, 1);
+    mocked.client.expireBearerForTests();
+    await mocked.client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "100-200-301",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    assert.equal(
+      mocked.calls.filter((c) => c.path === "/auth/verify").length,
+      2,
+      "expired JWT must re-run challenge/verify"
+    );
+  });
+
+  it("reports health without throwing when the gateway is down", async () => {
+    const pair = machinePemPair();
+    const client = new HiveClient({
+      config: () => loadHiveConfig(hiveEnv(pair.privatePem)),
+      fetch: async () => {
+        throw new Error("econnrefused");
+      },
+    });
+    const health = await client.health();
+    assert.equal(health.backend, "shadow");
+    assert.equal(health.configured, true);
+    assert.equal(health.reachable, false);
+    assert.match(health.error ?? "", /econnrefused/);
+  });
+});
+
+describe("hive wiring vs public contract", () => {
+  const saved: Record<string, string | undefined> = {};
+  const hiveKeys = [
+    "HIVE_BACKEND",
+    "HIVE_GATEWAY_URL",
+    "HIVE_TENANT_SLUG",
+    "HIVE_TENANT_ID",
+    "HIVE_MACHINE_KEY_ID",
+    "HIVE_MACHINE_PRIVATE_KEY_PEM",
+    "HIVE_SES_INBOX_ID",
+    "STORE_ENCRYPTION_KEY",
+  ];
+
+  beforeEach(() => {
+    for (const key of hiveKeys) saved[key] = process.env[key];
+    delete process.env.HIVE_BACKEND;
+    delete process.env.HIVE_GATEWAY_URL;
+    delete process.env.HIVE_TENANT_SLUG;
+    delete process.env.HIVE_TENANT_ID;
+    delete process.env.HIVE_MACHINE_KEY_ID;
+    delete process.env.HIVE_MACHINE_PRIVATE_KEY_PEM;
+    delete process.env.HIVE_SES_INBOX_ID;
+    process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+    resetHiveClientForTests();
+    freshStore();
+  });
+
+  afterEach(() => {
+    resetHiveClientForTests();
+    for (const key of hiveKeys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it("does not change GET /healthz when shadow is fail-closed", async () => {
+    process.env.HIVE_BACKEND = "shadow";
+    const app = createApp();
+    const h = await app.request("/healthz");
+    assert.equal(h.status, 200);
+    assert.equal(await h.text(), "ok");
+    const hive = await json(app, "/v1/_hive/health");
+    assert.equal(hive.status, 200);
+    assert.equal(hive.body.backend, "shadow");
+    assert.equal(hive.body.configured, false);
+  });
+
+  it("still creates and sends from SQLite when hive is enabled but down", async () => {
+    const pair = machinePemPair();
+    Object.assign(process.env, hiveEnv(pair.privatePem));
+    const prev = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("hive down");
+    }) as typeof fetch;
+    try {
+      const app = createApp();
+      const owner = ed25519PemPair();
+      const created = await json(app, "/v1/channels", postJson({ public_key_pem: owner.publicPem }));
+      assert.equal(created.status, 200, JSON.stringify(created.body));
+      const send = await json(
+        app,
+        `/v1/channels/${created.body.channel_id}/messages`,
+        postJson({ body: "still local" }, bearer(created.body.token))
+      );
+      assert.equal(send.status, 201);
+      assert.equal(send.body.message.body, "still local");
+      await waitForHiveShadow();
+      const health = await hiveHealth();
+      assert.equal(health.backend, "shadow");
+      assert.equal(health.reachable, false);
+    } finally {
+      globalThis.fetch = prev;
+    }
+  });
+
+  it("does not fetch hive when backend is off", async () => {
+    let fetches = 0;
+    const prev = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return jsonRes(500, {});
+    }) as typeof fetch;
+    try {
+      const app = createApp();
+      const owner = ed25519PemPair();
+      const created = await json(app, "/v1/channels", postJson({ public_key_pem: owner.publicPem }));
+      assert.equal(created.status, 200);
+      shadowChannelCreated({
+        channelId: created.body.channel_id,
+        createdAt: new Date().toISOString(),
+        encrypted: true,
+      });
+      await waitForHiveShadow();
+      assert.equal(fetches, 0);
+    } finally {
+      globalThis.fetch = prev;
+    }
+  });
+});
+
+describe("hive nonce helpers", () => {
+  it("signs decoded nonce bytes as unpadded base64url", () => {
+    const pair = machinePemPair();
+    const nonce = randomBytes(32).toString("base64url");
+    const signature = signNonce(pair.privatePem, nonce);
+    assert.equal(signature.includes("="), false);
+    assert.equal(jwtExpiryMs(fakeJwt(10)) !== null, true);
+    const ok = verify(null, decodeNonceBytes(nonce), createPublicKey(pair.publicPem), Buffer.from(signature, "base64url"));
+    assert.equal(ok, true);
+  });
+});
