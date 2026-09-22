@@ -1472,8 +1472,9 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
-  /** Operator-only reachability. Must not be consulted by GET /healthz. */
+  /** Operator-only reachability. Same moderator gate as /v1/moderation/*. */
   app.get("/v1/_hive/health", async (c) => {
+    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
     setApiSecurityHeaders(c);
     return c.json(await hiveHealth());
   });

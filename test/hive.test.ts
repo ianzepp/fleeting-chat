@@ -396,6 +396,7 @@ describe("hive wiring vs public contract", () => {
     "HIVE_MACHINE_PRIVATE_KEY_PEM",
     "HIVE_SES_INBOX_ID",
     "STORE_ENCRYPTION_KEY",
+    "MODERATION_TOKEN",
   ];
 
   beforeEach(() => {
@@ -407,6 +408,7 @@ describe("hive wiring vs public contract", () => {
     delete process.env.HIVE_MACHINE_KEY_ID;
     delete process.env.HIVE_MACHINE_PRIVATE_KEY_PEM;
     delete process.env.HIVE_SES_INBOX_ID;
+    delete process.env.MODERATION_TOKEN;
     process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
     resetHiveClientForTests();
     freshStore();
@@ -426,10 +428,43 @@ describe("hive wiring vs public contract", () => {
     const h = await app.request("/healthz");
     assert.equal(h.status, 200);
     assert.equal(await h.text(), "ok");
-    const hive = await json(app, "/v1/_hive/health");
+  });
+
+  it("forbids unauthenticated GET /v1/_hive/health without leaking hive details", async () => {
+    process.env.HIVE_BACKEND = "shadow";
+    process.env.MODERATION_TOKEN = "hive-moderator";
+    const app = createApp();
+    const unauth = await json(app, "/v1/_hive/health");
+    assert.equal(unauth.status, 403);
+    assert.equal(unauth.body.error, "moderator_unauthorized");
+    assert.equal(unauth.body.backend, undefined);
+    assert.equal(unauth.body.configured, undefined);
+    assert.equal(unauth.body.reachable, undefined);
+    assert.equal(unauth.body.missing, undefined);
+
+    const wrong = await json(app, "/v1/_hive/health", { headers: bearer("not-the-moderator") });
+    assert.equal(wrong.status, 403);
+    assert.equal(wrong.body.error, "moderator_unauthorized");
+    assert.equal(wrong.body.backend, undefined);
+
+    const owner = ed25519PemPair();
+    const created = await json(app, "/v1/channels", postJson({ public_key_pem: owner.publicPem }));
+    assert.equal(created.status, 200);
+    const asSeat = await json(app, "/v1/_hive/health", { headers: bearer(created.body.token) });
+    assert.equal(asSeat.status, 403);
+    assert.equal(asSeat.body.error, "moderator_unauthorized");
+    assert.equal(asSeat.body.backend, undefined);
+  });
+
+  it("returns hive health JSON when authorized with MODERATION_TOKEN", async () => {
+    process.env.HIVE_BACKEND = "shadow";
+    process.env.MODERATION_TOKEN = "hive-moderator";
+    const app = createApp();
+    const hive = await json(app, "/v1/_hive/health", { headers: bearer("hive-moderator") });
     assert.equal(hive.status, 200);
     assert.equal(hive.body.backend, "shadow");
     assert.equal(hive.body.configured, false);
+    assert.ok(Array.isArray(hive.body.missing));
   });
 
   it("still creates and sends from SQLite when hive is enabled but down", async () => {

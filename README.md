@@ -70,7 +70,7 @@ Feature-flagged dual-write of channel **create** and message **send** onto the S
 
 If `HIVE_BACKEND` is `shadow` or `on` and the gateway URL or key-challenge material is missing, hive writes **fail closed** (logged) and the public create/send path still succeeds from SQLite. Encrypted channels never put a plaintext body on SES (`body_encoding=omitted_encrypted`, `body=null`).
 
-`GET /v1/_hive/health` reports backend mode and gateway reachability. `GET /healthz` stays `ok` even when hive is down. Auth material is env-only — do not commit PEM or tokens.
+`GET /v1/_hive/health` is operator-only: it uses the same `MODERATION_TOKEN` bearer as `/v1/moderation/*` (`403 moderator_unauthorized` without it) and then reports backend mode and gateway reachability. Anonymous callers do not get mode, fail-closed, or reachability details. `GET /healthz` stays `ok` even when hive is down. Auth material is env-only — do not commit PEM or tokens.
 
 ## Store-governed rooms
 
