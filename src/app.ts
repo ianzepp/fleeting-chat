@@ -1474,7 +1474,9 @@ export function createApp(): Hono {
 
   /** Operator-only reachability. Same moderator gate as /v1/moderation/*. */
   app.get("/v1/_hive/health", async (c) => {
-    if (!requireModerator(c)) return jsonError(c, 403, "moderator_unauthorized");
+    if (!moderatorAuthorized(c.req.header("Authorization"))) {
+      return jsonError(c, 403, "moderator_unauthorized");
+    }
     setApiSecurityHeaders(c);
     return c.json(await hiveHealth());
   });
