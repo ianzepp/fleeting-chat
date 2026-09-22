@@ -24,19 +24,17 @@ export function loadMachinePrivateKey(pem: string): KeyObject {
   return key;
 }
 
-/** Gateway nonce is URL-safe base64 (no padding) of the raw bytes to sign. */
-export function decodeNonceBytes(nonce: string): Buffer {
+/** Swarm Key verifies `nonce.as_bytes()` — UTF-8 of the nonce *string*, not decoded raw bytes. */
+export function nonceMessageBytes(nonce: string): Buffer {
   const trimmed = nonce.trim();
   if (!trimmed) throw new Error("empty hive challenge nonce");
-  const bytes = Buffer.from(trimmed, "base64url");
-  if (bytes.length === 0) throw new Error("hive challenge nonce did not decode");
-  return bytes;
+  return Buffer.from(trimmed, "utf8");
 }
 
-/** Ed25519 signature of nonce bytes, URL-safe base64 without padding. */
+/** Ed25519 signature of nonce UTF-8 string bytes, URL-safe base64 without padding. */
 export function signNonce(privateKeyPem: string, nonce: string): string {
   const key = loadMachinePrivateKey(privateKeyPem);
-  const sig = sign(null, decodeNonceBytes(nonce), key);
+  const sig = sign(null, nonceMessageBytes(nonce), key);
   return sig.toString("base64url");
 }
 

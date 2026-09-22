@@ -16,7 +16,7 @@ import {
   shadowChannelCreated,
   waitForHiveShadow,
 } from "../src/hive/index.js";
-import { decodeNonceBytes, jwtExpiryMs, signNonce } from "../src/hive/auth.js";
+import { jwtExpiryMs, nonceMessageBytes, signNonce } from "../src/hive/auth.js";
 import { bearer, ed25519PemPair, freshStore, json, postJson } from "./support.js";
 
 function machinePemPair() {
@@ -96,11 +96,16 @@ function mockHive(opts: {
       assert.equal(typeof raw?.signature, "string");
       const nonce = issuedNonces.get(String(raw.challenge_id));
       assert.ok(nonce, "verify must reference a live challenge nonce");
-      const nonceBytes = decodeNonceBytes(nonce);
+      const nonceBytes = nonceMessageBytes(nonce);
       const sig = Buffer.from(String(raw.signature), "base64url");
       assert.equal(String(raw.signature).includes("="), false, "signature must be unpadded base64url");
       const pub = createPublicKey(opts.publicPem);
       assert.equal(verify(null, nonceBytes, pub, sig), true, "nonce signature must verify");
+      assert.equal(
+        verify(null, Buffer.from(nonce, "base64url"), pub, sig),
+        false,
+        "must not sign decoded nonce bytes (swarm-key verifies UTF-8 string bytes)"
+      );
       return jsonRes(200, { token: fakeJwt(opts.jwtTtlSec ?? 86_400) });
     }
     if (method === "POST" && path === "/ses/provision") {
@@ -758,13 +763,26 @@ describe("hive wiring vs public contract", () => {
 });
 
 describe("hive nonce helpers", () => {
-  it("signs decoded nonce bytes as unpadded base64url", () => {
+  it("signs UTF-8 nonce string bytes as unpadded base64url", () => {
     const pair = machinePemPair();
     const nonce = randomBytes(32).toString("base64url");
     const signature = signNonce(pair.privatePem, nonce);
     assert.equal(signature.includes("="), false);
     assert.equal(jwtExpiryMs(fakeJwt(10)) !== null, true);
-    const ok = verify(null, decodeNonceBytes(nonce), createPublicKey(pair.publicPem), Buffer.from(signature, "base64url"));
-    assert.equal(ok, true);
+    const pub = createPublicKey(pair.publicPem);
+    const sig = Buffer.from(signature, "base64url");
+    assert.equal(verify(null, nonceMessageBytes(nonce), pub, sig), true);
+    assert.equal(verify(null, Buffer.from(nonce, "utf8"), pub, sig), true);
+    assert.equal(
+      verify(null, Buffer.from(nonce, "base64url"), pub, sig),
+      false,
+      "decoded nonce bytes must not verify (swarm-cli signs nonce.as_bytes())"
+    );
+  });
+
+  it("trims surrounding whitespace before signing", () => {
+    const pair = machinePemPair();
+    const nonce = randomBytes(32).toString("base64url");
+    assert.equal(signNonce(pair.privatePem, `  ${nonce}\n`), signNonce(pair.privatePem, nonce));
   });
 });
