@@ -102,10 +102,35 @@ function readInboxId(obj: JsonObject | null): string | undefined {
   return readString(obj, "inbox_id", "id");
 }
 
+function extractEmailField(value: unknown): string | undefined {
+  const obj = asObject(value);
+  const direct = readString(obj, "email", "address");
+  if (direct) return direct;
+  if (!obj) return undefined;
+  for (const key of ["inbox", "mailbox", "record"]) {
+    const nested = readString(asObject(obj[key] as JsonObject | undefined), "email", "address");
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** SES delivery targets need a dotted domain. `local@<tenant>` (no .swarm) is NO_DELIVERY_TARGETS. */
+function coerceInboxEmail(raw: string | undefined, tenantSlug: string): string {
+  const fallback = sesInboxEmail(tenantSlug);
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  const at = trimmed.lastIndexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) return fallback;
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  if (!domain.includes(".") || domain === tenantSlug) {
+    return `${local}@${tenantSlug}.swarm`;
+  }
+  return trimmed;
+}
+
 function readInboxEmail(obj: JsonObject | null, tenantSlug: string): string {
-  const fromRow = readString(obj, "email", "address");
-  if (fromRow && fromRow.includes("@")) return fromRow;
-  return sesInboxEmail(tenantSlug);
+  return coerceInboxEmail(extractEmailField(obj), tenantSlug);
 }
 
 function addressContainsLocalPart(value: string | undefined, localPart: string): boolean {
@@ -214,7 +239,7 @@ export class HiveClient {
     const inboxId = await this.ensureInbox(cfg);
     const threadId = this.threads.get(input.channelId);
     const payload: JsonObject = {
-      to: [this.inboxEmail ?? sesInboxEmail(cfg.tenantSlug)],
+      to: [coerceInboxEmail(this.inboxEmail ?? undefined, cfg.tenantSlug)],
       subject: input.channelId,
       text: JSON.stringify(envelope),
       labels: ["fleeting.v1.shadow", input.event],

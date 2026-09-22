@@ -515,6 +515,43 @@ describe("hive client", () => {
     assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
   });
 
+  it("coerces pinned inbox email missing .swarm so send to is deliverable", async () => {
+    const pair = machinePemPair();
+    const env = { ...hiveEnv(pair.privatePem), HIVE_SES_INBOX_ID: "003da5c8-9135-439a-a0c5-d5ea74796348" };
+    const calls: RecordedCall[] = [];
+    const client = new HiveClient({
+      config: () => loadHiveConfig(env),
+      fetch: async (input, init) => {
+        const path = new URL(input).pathname;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const raw = init?.body == null ? null : JSON.parse(String(init.body));
+        calls.push({ method, path, body: raw });
+        if (path === "/auth/challenge") {
+          return jsonRes(200, { challenge_id: "c1", nonce: randomBytes(32).toString("base64url") });
+        }
+        if (path === "/auth/verify") return jsonRes(200, { token: fakeJwt(86_400) });
+        if (method === "GET" && path === "/ses/inboxes/003da5c8-9135-439a-a0c5-d5ea74796348") {
+          return jsonRes(200, {
+            inbox_id: "003da5c8-9135-439a-a0c5-d5ea74796348",
+            email: "fleeting-shadow@fleeting",
+          });
+        }
+        if (path.includes("/messages/send")) return jsonRes(200, { thread_id: "t" });
+        return jsonRes(404, {});
+      },
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "100-200-300",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"), false);
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+    assert.equal(JSON.stringify(send?.body?.to).includes("@fleeting\""), false);
+  });
+
   it("falls back to tenant .swarm to when pinned inbox GET fails", async () => {
     const pair = machinePemPair();
     const env = { ...hiveEnv(pair.privatePem), HIVE_SES_INBOX_ID: "preset-inbox" };
