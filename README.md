@@ -66,7 +66,9 @@ Feature-flagged dual-write of channel **create** and message **send** onto the S
 | `HIVE_TENANT_ID` | Tenant UUID. |
 | `HIVE_MACHINE_KEY_ID` | Machine key id for swarm key-challenge auth. |
 | `HIVE_MACHINE_PRIVATE_KEY_PEM` | Ed25519 PKCS8 PEM. Auth is `POST /auth/challenge` → sign nonce → `POST /auth/verify`; the bearer is cached in memory only. There is no `HIVE_MACHINE_TOKEN`. |
-| `HIVE_SES_INBOX_ID` | Optional. If unset, the process creates or reuses a named inbox (`fleeting-shadow`) and caches the id in memory — never on disk. |
+| `HIVE_SES_INBOX_ID` | Optional. If set, skip inbox list/create and send using this id. If unset, the process creates or reuses mailbox `fleeting-shadow@<tenant>.swarm` (`display_name` / local part `fleeting-shadow`) and caches the id in memory — never on disk. |
+
+Swarm SES requires a tenant mailbox `email` (`local@<tenant_slug>.swarm`), not a `name` field. Auto-create POSTs `{ email: "fleeting-shadow@<tenant>.swarm", display_name: "fleeting-shadow", purpose: "fleeting-shadow" }` and sends `to` that address (or the inbox `email` returned by create/list). Existing inboxes are matched by `local_part`, `display_name`, `email`, or an address containing the local part.
 
 If `HIVE_BACKEND` is `shadow` or `on` and the gateway URL or key-challenge material is missing, hive writes **fail closed** (logged) and the public create/send path still succeeds from SQLite. Encrypted channels never put a plaintext body on SES (`body_encoding=omitted_encrypted`, `body=null`).
 

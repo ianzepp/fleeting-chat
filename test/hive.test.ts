@@ -6,11 +6,13 @@ import { createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:
 import { createApp } from "../src/app.js";
 import {
   HiveClient,
+  HIVE_INBOX_NAME,
   buildShadowEnvelope,
   hiveHealth,
   loadHiveConfig,
   parseHiveBackendMode,
   resetHiveClientForTests,
+  sesInboxEmail,
   shadowChannelCreated,
   waitForHiveShadow,
 } from "../src/hive/index.js";
@@ -108,7 +110,17 @@ function mockHive(opts: {
       return jsonRes(200, { inboxes: opts.existingInboxes ?? [] });
     }
     if (method === "POST" && path === "/ses/inboxes") {
-      return jsonRes(200, { id: inboxId, name: raw?.name });
+      assert.equal(raw?.email, "fleeting-shadow@fleeting.swarm");
+      assert.match(String(raw?.email), /@fleeting\.swarm$/);
+      assert.equal(raw?.display_name, HIVE_INBOX_NAME);
+      assert.equal(raw?.purpose, HIVE_INBOX_NAME);
+      assert.equal(raw?.name, undefined);
+      return jsonRes(200, {
+        inbox_id: inboxId,
+        email: raw?.email,
+        display_name: raw?.display_name,
+        local_part: HIVE_INBOX_NAME,
+      });
     }
     if (method === "POST" && path.endsWith("/messages/send")) {
       if (opts.failSend) return jsonRes(503, { error: { code: "UNAVAILABLE", message: "ses down" } });
@@ -165,6 +177,7 @@ describe("hive config", () => {
     assert.equal(cfg.failClosed, false);
     assert.equal(cfg.tenantSlug, "fleeting");
     assert.match(cfg.machinePrivateKeyPem, /BEGIN PRIVATE KEY/);
+    assert.equal(sesInboxEmail(cfg.tenantSlug), "fleeting-shadow@fleeting.swarm");
   });
 });
 
@@ -254,6 +267,8 @@ describe("hive client", () => {
     assert.equal(send.path, "/ses/inboxes/inbox-shadow/messages/send");
     assert.match(send.auth ?? "", /^Bearer /);
     assert.equal(send.body?.subject, "482-019-773");
+    assert.deepEqual(send.body?.to, [sesInboxEmail("fleeting")]);
+    assert.match(String((send.body?.to as string[])?.[0] ?? ""), /@fleeting\.swarm$/);
     const text = JSON.parse(String(send.body?.text));
     assert.equal(text.kind, "fleeting.v1.shadow");
     assert.equal(text.event, "channel.create");
@@ -262,7 +277,105 @@ describe("hive client", () => {
     assert.equal(text.body, null);
     assert.ok(calls.some((c) => c.path === "/auth/challenge"));
     assert.ok(calls.some((c) => c.path === "/auth/verify"));
-    assert.ok(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"));
+    const create = calls.find((c) => c.path === "/ses/inboxes" && c.method === "POST");
+    assert.ok(create);
+    assert.equal(create.body?.email, "fleeting-shadow@fleeting.swarm");
+    assert.equal(create.body?.display_name, "fleeting-shadow");
+    assert.equal(create.body?.purpose, "fleeting-shadow");
+  });
+
+  it("matches an existing inbox by local_part or email, not only name", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive({
+      ...pair,
+      existingInboxes: [
+        { name: "hive", display_name: "hive", inbox_id: "inbox-hive", email: "hive@fleeting.swarm" },
+        {
+          local_part: "fleeting-shadow",
+          display_name: "fleeting-shadow",
+          email: "fleeting-shadow@fleeting.swarm",
+          inbox_id: "inbox-existing",
+          id: "ignored-id",
+        },
+      ],
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "482-019-773",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+    });
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"), false);
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.equal(send?.path, "/ses/inboxes/inbox-existing/messages/send");
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+  });
+
+  it("creates the tenant .swarm mailbox when list only has the hive inbox", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive({
+      ...pair,
+      existingInboxes: [{ name: "hive", display_name: "hive", inbox_id: "inbox-hive" }],
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "482-019-773",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+    });
+    const create = calls.find((c) => c.path === "/ses/inboxes" && c.method === "POST");
+    assert.ok(create);
+    assert.equal(create.body?.email, "fleeting-shadow@fleeting.swarm");
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.equal(send?.path, "/ses/inboxes/inbox-shadow/messages/send");
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+  });
+
+  it("matches an existing inbox when address contains the local part", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive({
+      ...pair,
+      existingInboxes: [
+        { address: "fleeting-shadow@fleeting.swarm", inbox_id: "inbox-from-address" },
+      ],
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "482-019-773",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+    });
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"), false);
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.equal(send?.path, "/ses/inboxes/inbox-from-address/messages/send");
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+  });
+
+  it("prefers inbox_id over id and send to from the listed email", async () => {
+    const pair = machinePemPair();
+    const { client, calls } = mockHive({
+      ...pair,
+      existingInboxes: [
+        {
+          display_name: "fleeting-shadow",
+          id: "legacy-id",
+          inbox_id: "preferred-inbox",
+          email: "fleeting-shadow@fleeting.swarm",
+        },
+      ],
+    });
+    await client.sendShadowEvent({
+      event: "message.send",
+      channelId: "100-200-300",
+      messageId: "m1",
+      seat: "1",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      encrypted: false,
+      body: "hi",
+    });
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.equal(send?.path, "/ses/inboxes/preferred-inbox/messages/send");
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
   });
 
   it("reuses a cached bearer and a per-channel thread_id", async () => {
@@ -343,6 +456,8 @@ describe("hive client", () => {
     });
     assert.equal(calls.some((c) => c.path === "/ses/inboxes"), false);
     assert.ok(calls.some((c) => c.path === "/ses/inboxes/preset-inbox/messages/send"));
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.deepEqual(send?.body?.to, [sesInboxEmail("fleeting")]);
   });
 
   it("refreshes the bearer before JWT expiry", async () => {

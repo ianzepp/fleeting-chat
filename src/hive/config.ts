@@ -6,6 +6,11 @@
 
 export const HIVE_INBOX_NAME = "fleeting-shadow";
 
+/** Tenant mailbox local@<tenant_slug>.swarm — Swarm SES requires `email`, not `name`. */
+export function sesInboxEmail(tenantSlug: string, localPart = HIVE_INBOX_NAME): string {
+  return `${localPart}@${tenantSlug}.swarm`;
+}
+
 export type HiveBackendMode = "off" | "shadow" | "on";
 
 export interface HiveConfig {
