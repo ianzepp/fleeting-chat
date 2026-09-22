@@ -444,6 +444,12 @@ describe("hive client", () => {
           return jsonRes(200, { challenge_id: "c1", nonce: randomBytes(32).toString("base64url") });
         }
         if (path === "/auth/verify") return jsonRes(200, { token: fakeJwt(86_400) });
+        if (method === "GET" && path === "/ses/inboxes/preset-inbox") {
+          return jsonRes(200, {
+            inbox_id: "preset-inbox",
+            email: "fleeting-shadow@fleeting.swarm",
+          });
+        }
         if (path.includes("/messages/send")) return jsonRes(200, { thread_id: "t" });
         return jsonRes(404, {});
       },
@@ -454,10 +460,84 @@ describe("hive client", () => {
       createdAt: new Date().toISOString(),
       encrypted: false,
     });
-    assert.equal(calls.some((c) => c.path === "/ses/inboxes"), false);
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"), false);
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "GET"), false);
+    assert.ok(calls.some((c) => c.method === "GET" && c.path === "/ses/inboxes/preset-inbox"));
     assert.ok(calls.some((c) => c.path === "/ses/inboxes/preset-inbox/messages/send"));
     const send = calls.find((c) => c.path.includes("/messages/send"));
     assert.deepEqual(send?.body?.to, [sesInboxEmail("fleeting")]);
+    assert.match(String((send?.body?.to as string[])?.[0] ?? ""), /@fleeting\.swarm$/);
+  });
+
+  it("sends to the pinned inbox email from GET /ses/inboxes/{id}", async () => {
+    const pair = machinePemPair();
+    const env = { ...hiveEnv(pair.privatePem), HIVE_SES_INBOX_ID: "003da5c8-9135-439a-a0c5-d5ea74796348" };
+    const calls: RecordedCall[] = [];
+    const client = new HiveClient({
+      config: () => loadHiveConfig(env),
+      fetch: async (input, init) => {
+        const path = new URL(input).pathname;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const raw = init?.body == null ? null : JSON.parse(String(init.body));
+        calls.push({ method, path, body: raw });
+        if (path === "/auth/challenge") {
+          return jsonRes(200, { challenge_id: "c1", nonce: randomBytes(32).toString("base64url") });
+        }
+        if (path === "/auth/verify") return jsonRes(200, { token: fakeJwt(86_400) });
+        if (method === "GET" && path === "/ses/inboxes/003da5c8-9135-439a-a0c5-d5ea74796348") {
+          return jsonRes(200, {
+            inbox_id: "003da5c8-9135-439a-a0c5-d5ea74796348",
+            email: "fleeting-shadow@fleeting.swarm",
+            display_name: "fleeting-shadow",
+          });
+        }
+        if (path.includes("/messages/send")) return jsonRes(200, { thread_id: "t" });
+        return jsonRes(404, {});
+      },
+    });
+    await client.sendShadowEvent({
+      event: "message.send",
+      channelId: "100-200-300",
+      messageId: "m1",
+      seat: "1",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+      body: "pinned",
+    });
+    assert.equal(calls.some((c) => c.path === "/ses/inboxes" && c.method === "POST"), false);
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.equal(send?.path, "/ses/inboxes/003da5c8-9135-439a-a0c5-d5ea74796348/messages/send");
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+  });
+
+  it("falls back to tenant .swarm to when pinned inbox GET fails", async () => {
+    const pair = machinePemPair();
+    const env = { ...hiveEnv(pair.privatePem), HIVE_SES_INBOX_ID: "preset-inbox" };
+    const calls: RecordedCall[] = [];
+    const client = new HiveClient({
+      config: () => loadHiveConfig(env),
+      fetch: async (input, init) => {
+        const path = new URL(input).pathname;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const raw = init?.body == null ? null : JSON.parse(String(init.body));
+        calls.push({ method, path, body: raw });
+        if (path === "/auth/challenge") {
+          return jsonRes(200, { challenge_id: "c1", nonce: randomBytes(32).toString("base64url") });
+        }
+        if (path === "/auth/verify") return jsonRes(200, { token: fakeJwt(86_400) });
+        if (path.includes("/messages/send")) return jsonRes(200, { thread_id: "t" });
+        return jsonRes(404, {});
+      },
+    });
+    await client.sendShadowEvent({
+      event: "channel.create",
+      channelId: "100-200-300",
+      createdAt: new Date().toISOString(),
+      encrypted: false,
+    });
+    const send = calls.find((c) => c.path.includes("/messages/send"));
+    assert.deepEqual(send?.body?.to, ["fleeting-shadow@fleeting.swarm"]);
+    assert.ok(calls.some((c) => c.path === "/ses/inboxes/preset-inbox/messages/send"));
   });
 
   it("refreshes the bearer before JWT expiry", async () => {

@@ -280,10 +280,23 @@ export class HiveClient {
     return id;
   }
 
+  private async loadPinnedInboxEmail(cfg: HiveConfig, inboxId: string): Promise<string> {
+    try {
+      const fetched = await this.authedJson(cfg, "GET", `/ses/inboxes/${encodeURIComponent(inboxId)}`);
+      const rows = collectObjects(fetched);
+      const match = rows.find((row) => readInboxId(row) === inboxId) ?? rows[0] ?? asObject(fetched);
+      return readInboxEmail(match ?? null, cfg.tenantSlug);
+    } catch {
+      return sesInboxEmail(cfg.tenantSlug);
+    }
+  }
+
   private async ensureInbox(cfg: HiveConfig): Promise<string> {
     if (cfg.sesInboxId) {
       this.inboxId = cfg.sesInboxId;
-      this.inboxEmail = this.inboxEmail ?? sesInboxEmail(cfg.tenantSlug);
+      if (!this.inboxEmail) {
+        this.inboxEmail = await this.loadPinnedInboxEmail(cfg, cfg.sesInboxId);
+      }
       return cfg.sesInboxId;
     }
     if (this.inboxId) return this.inboxId;
@@ -297,6 +310,7 @@ export class HiveClient {
     const created = await this.authedJson(cfg, "POST", "/ses/inboxes", {
       email: sesInboxEmail(cfg.tenantSlug),
       display_name: INBOX_NAME,
+      // Non-agent purpose: Swarm SES requires owner_user_id when purpose/role is agent-ish.
       purpose: INBOX_NAME,
     });
     const createdObj = asObject(created);
