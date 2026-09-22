@@ -1,4 +1,11 @@
-export { loadHiveConfig, parseHiveBackendMode, type HiveBackendMode, type HiveConfig } from "./config.js";
+export {
+  HIVE_INBOX_NAME,
+  loadHiveConfig,
+  parseHiveBackendMode,
+  sesInboxEmail,
+  type HiveBackendMode,
+  type HiveConfig,
+} from "./config.js";
 export {
   HiveClient,
   buildShadowEnvelope,

@@ -4,7 +4,7 @@
  * Shadow/on failures are logged and swallowed so the public HTTP path is unchanged.
  */
 
-import { HIVE_INBOX_NAME, loadHiveConfig, type HiveBackendMode, type HiveConfig } from "./config.js";
+import { HIVE_INBOX_NAME, loadHiveConfig, sesInboxEmail, type HiveBackendMode, type HiveConfig } from "./config.js";
 import {
   bearerRefreshAt,
   bearerStillFresh,
@@ -97,6 +97,62 @@ function readString(obj: JsonObject | null, ...keys: string[]): string | undefin
   return undefined;
 }
 
+/** Prefer SES `inbox_id`; some responses only expose `id`. */
+function readInboxId(obj: JsonObject | null): string | undefined {
+  return readString(obj, "inbox_id", "id");
+}
+
+function extractEmailField(value: unknown): string | undefined {
+  const obj = asObject(value);
+  const direct = readString(obj, "email", "address");
+  if (direct) return direct;
+  if (!obj) return undefined;
+  for (const key of ["inbox", "mailbox", "record"]) {
+    const nested = readString(asObject(obj[key] as JsonObject | undefined), "email", "address");
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** SES delivery targets need a dotted domain. `local@<tenant>` (no .swarm) is NO_DELIVERY_TARGETS. */
+function coerceInboxEmail(raw: string | undefined, tenantSlug: string): string {
+  const fallback = sesInboxEmail(tenantSlug);
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  const at = trimmed.lastIndexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) return fallback;
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  if (!domain.includes(".") || domain === tenantSlug) {
+    return `${local}@${tenantSlug}.swarm`;
+  }
+  return trimmed;
+}
+
+function readInboxEmail(obj: JsonObject | null, tenantSlug: string): string {
+  return coerceInboxEmail(extractEmailField(obj), tenantSlug);
+}
+
+function addressContainsLocalPart(value: string | undefined, localPart: string): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed === localPart) return true;
+  const at = trimmed.indexOf("@");
+  const local = at >= 0 ? trimmed.slice(0, at) : trimmed;
+  return local === localPart || trimmed.includes(localPart);
+}
+
+/** Match a listed inbox by local_part / display_name / email / address — not only `name`. */
+function inboxMatches(row: JsonObject, localPart: string): boolean {
+  if (readString(row, "local_part") === localPart) return true;
+  if (readString(row, "display_name") === localPart) return true;
+  if (addressContainsLocalPart(readString(row, "email"), localPart)) return true;
+  if (addressContainsLocalPart(readString(row, "address"), localPart)) return true;
+  if (readString(row, "name") === localPart) return true;
+  return false;
+}
+
 function collectObjects(value: unknown): JsonObject[] {
   if (Array.isArray(value)) {
     return value.filter((item): item is JsonObject => !!item && typeof item === "object" && !Array.isArray(item));
@@ -123,6 +179,7 @@ class HiveRequestError extends Error {
 export class HiveClient {
   private cachedBearer: CachedBearer | null = null;
   private inboxId: string | null = null;
+  private inboxEmail: string | null = null;
   private provisioned = false;
   private readonly threads = new Map<string, string>();
   private readonly inflight = new Set<Promise<void>>();
@@ -140,6 +197,7 @@ export class HiveClient {
   reset(): void {
     this.cachedBearer = null;
     this.inboxId = null;
+    this.inboxEmail = null;
     this.provisioned = false;
     this.threads.clear();
     this.failClosedLogged = false;
@@ -181,7 +239,7 @@ export class HiveClient {
     const inboxId = await this.ensureInbox(cfg);
     const threadId = this.threads.get(input.channelId);
     const payload: JsonObject = {
-      to: [`${INBOX_NAME}@${cfg.tenantSlug}`],
+      to: [coerceInboxEmail(this.inboxEmail ?? undefined, cfg.tenantSlug)],
       subject: input.channelId,
       text: JSON.stringify(envelope),
       labels: ["fleeting.v1.shadow", input.event],
@@ -241,25 +299,49 @@ export class HiveClient {
     return `hive ${cfg.mode} fail-closed: missing ${missing}`;
   }
 
+  private rememberInbox(cfg: HiveConfig, id: string, source: JsonObject | null): string {
+    this.inboxId = id;
+    this.inboxEmail = readInboxEmail(source, cfg.tenantSlug);
+    return id;
+  }
+
+  private async loadPinnedInboxEmail(cfg: HiveConfig, inboxId: string): Promise<string> {
+    try {
+      const fetched = await this.authedJson(cfg, "GET", `/ses/inboxes/${encodeURIComponent(inboxId)}`);
+      const rows = collectObjects(fetched);
+      const match = rows.find((row) => readInboxId(row) === inboxId) ?? rows[0] ?? asObject(fetched);
+      return readInboxEmail(match ?? null, cfg.tenantSlug);
+    } catch {
+      return sesInboxEmail(cfg.tenantSlug);
+    }
+  }
+
   private async ensureInbox(cfg: HiveConfig): Promise<string> {
     if (cfg.sesInboxId) {
       this.inboxId = cfg.sesInboxId;
+      if (!this.inboxEmail) {
+        this.inboxEmail = await this.loadPinnedInboxEmail(cfg, cfg.sesInboxId);
+      }
       return cfg.sesInboxId;
     }
     if (this.inboxId) return this.inboxId;
     await this.provision(cfg);
     const listed = await this.authedJson(cfg, "GET", "/ses/inboxes");
-    const existing = collectObjects(listed).find((row) => readString(row, "name", "display_name") === INBOX_NAME);
-    const existingId = readString(existing ?? null, "id", "inbox_id");
+    const existing = collectObjects(listed).find((row) => inboxMatches(row, INBOX_NAME));
+    const existingId = readInboxId(existing ?? null);
     if (existingId) {
-      this.inboxId = existingId;
-      return existingId;
+      return this.rememberInbox(cfg, existingId, existing ?? null);
     }
-    const created = await this.authedJson(cfg, "POST", "/ses/inboxes", { name: INBOX_NAME });
-    const createdId = readString(asObject(created), "id", "inbox_id");
+    const created = await this.authedJson(cfg, "POST", "/ses/inboxes", {
+      email: sesInboxEmail(cfg.tenantSlug),
+      display_name: INBOX_NAME,
+      // Non-agent purpose: Swarm SES requires owner_user_id when purpose/role is agent-ish.
+      purpose: INBOX_NAME,
+    });
+    const createdObj = asObject(created);
+    const createdId = readInboxId(createdObj);
     if (!createdId) throw new Error("hive SES inbox create returned no id");
-    this.inboxId = createdId;
-    return createdId;
+    return this.rememberInbox(cfg, createdId, createdObj);
   }
 
   private async provision(cfg: HiveConfig): Promise<void> {
