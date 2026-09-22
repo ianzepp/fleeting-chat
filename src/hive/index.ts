@@ -20,4 +20,4 @@ export {
   type ShadowEvent,
   type ShadowWriteInput,
 } from "./client.js";
-export { decodeNonceBytes, signNonce, jwtExpiryMs } from "./auth.js";
+export { nonceMessageBytes, signNonce, jwtExpiryMs } from "./auth.js";
