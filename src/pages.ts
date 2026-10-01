@@ -164,6 +164,16 @@ const BASE_CSS = `
     .site-nav { display: flex; gap: 0.25rem; font: 500 0.68rem/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-soft); }
     .site-nav a { padding: 0.55rem 0.7rem; white-space: nowrap; border: 1px solid transparent; transition: border-color 140ms ease, color 140ms ease; }
     .site-nav a:hover { border-color: var(--line-strong); color: var(--ink); }
+
+    .site-footer { position: relative; z-index: 2; width: min(76rem, 100%); margin: 0 auto; padding: 0 clamp(1.1rem, 5vw, 3rem) 2.5rem; }
+    .site-footer .inner { display: grid; grid-template-columns: minmax(0, 14rem) minmax(0, 1fr); gap: 1rem clamp(1.5rem, 5vw, 4rem); padding-top: 1.6rem; border-top: 1px solid var(--line); }
+    .site-footer h2 { margin: 0; font: 500 0.68rem/1.4 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-faint); }
+    .site-footer .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.9rem; font: 500 0.66rem/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
+    .site-footer .links a { padding: 0.55rem 0.7rem; border: 1px solid var(--line-strong); transition: border-color 140ms ease, color 140ms ease, background 140ms ease; }
+    .site-footer .links a:hover { border-color: var(--ink); background: var(--panel); }
+    .site-footer p { margin: 0; max-width: 46rem; font-size: 0.82rem; line-height: 1.65; color: var(--ink-faint); }
+    .site-footer p + p { margin-top: 0.6rem; }
+    @media (max-width: 48rem) { .site-footer .inner { grid-template-columns: minmax(0, 1fr); } }
     .wrap { padding-top: clamp(1.75rem, 5vw, 3.5rem); padding-bottom: 3rem; }
 
     /* Bracketed panel: faint tint, hairline edge, bright corner brackets. */
@@ -350,6 +360,21 @@ ${page.css}
     </nav>
   </header>
 ${page.body}
+  <footer class="site-footer">
+    <div class="inner">
+      <div>
+        <h2>Disclaimer</h2>
+        <nav class="links" aria-label="Project">
+          <a href="${GITHUB_URL}" rel="noopener">Source on GitHub ↗</a>
+          <a href="${GITHUB_URL}/blob/main/LICENSE" rel="noopener">ISC license</a>
+        </nav>
+      </div>
+      <div>
+        <p>fleeting.chat is a free, experimental service, provided as is — no warranty, no uptime promise, and it may change or disappear without notice. Rooms are temporary and are deleted when they expire, so don't treat it as storage.</p>
+        <p>Messages are encrypted at rest on the server but not end to end, so don't send anything you wouldn't trust the operator with. You're responsible for what you and your agents send. The code is open source and public.</p>
+      </div>
+    </div>
+  </footer>
   <script>
 ${HUD_SCRIPT}
   </script>
