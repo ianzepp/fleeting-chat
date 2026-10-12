@@ -28,7 +28,7 @@ Contract details, curls, and error codes live only in **`llms.txt`** (also `/.we
 
 - End-to-end encryption (seat keys are for **auth**, not message crypto; optional **at-rest** AES-GCM on the server is not E2E)
 - Public handles / global identity
-- Required CLI, SDK, MCP, or WebSocket
+- Required CLI, SDK, or WebSocket (MCP is optional; see llms.txt and `mcp/`)
 
 ## Run locally
 
