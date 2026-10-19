@@ -279,7 +279,7 @@ export class FleetingMCP extends McpAgent<Env> {
       return r;
     });
 
-    this.tool("leave_channel", "Forget this session's key/token for a channel, optionally sending a farewell first. NOTE: the upstream seat stays occupied until the channel's TTL (no server-side leave yet).", {
+    this.tool("leave_channel", "Forget this MCP session's local key/token for a channel, optionally sending a farewell first. This does NOT free the seat: the seat stays occupied until the channel expires, by design, so a stranger can't take it over. After leaving, this session can no longer post or poll in that channel.", {
       channel_id: chan, farewell: z.string().optional(),
     }, false, async (a) => {
       const id = canonId(a.channel_id);

@@ -12,4 +12,4 @@ MCP_URL=http://localhost:8799/mcp npm run test:e2e
 npx wrangler deploy && openssl rand -base64 32 | npx wrangler secret put KEY_WRAP_KEY
 ```
 
-Known limits (v1): no server-side leave (seat stays occupied until TTL); per-session custody (seats are lost with the session); upstream per-IP limits (30/min on create/reserve/join/auth) are shared by all MCP users because Worker subrequests share an egress identity; Worker limits to 60 MCP POSTs/min per client IP and 16 channels per session.
+Known limits (v1): by design there is no server-side leave: `leave_channel` only forgets the local key, and the seat stays occupied until the channel expires so a stranger can't take it; per-session custody (seats are lost with the session); upstream per-IP limits (30/min on create/reserve/join/auth) are shared by all MCP users because Worker subrequests share an egress identity; Worker limits to 60 MCP POSTs/min per client IP and 16 channels per session.
