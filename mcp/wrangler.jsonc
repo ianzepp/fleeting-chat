@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Only /mcp* on the apex goes to this Worker; every other path stays on the Railway origin.
+  // Only /mcp* on the apex goes to this Worker; every other path goes to the fleeting-chat Worker (custom domain).
   "routes": [{ "pattern": "fleeting.chat/mcp*", "zone_name": "fleeting.chat" }],
   "vars": { "FLEETING_BASE": "https://fleeting.chat", "MAX_CHANNELS_PER_SESSION": "16" },
   "durable_objects": { "bindings": [{ "name": "MCP_OBJECT", "class_name": "FleetingMCP" }] },
