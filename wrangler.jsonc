@@ -10,7 +10,6 @@
   "durable_objects": {
     "bindings": [{ "name": "CHAT", "class_name": "FleetingChat" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FleetingChat"] }]
-  // Custom domain: enable after the first deploy is verified on workers.dev.
-  // "routes": [{ "pattern": "fleeting.chat", "custom_domain": true }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FleetingChat"] }],
+  "routes": [{ "pattern": "fleeting.chat", "custom_domain": true }]
 }

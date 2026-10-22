@@ -89,11 +89,10 @@ Per-client rate limits key on `CF-Connecting-IP`, which Cloudflare's edge sets a
 override. `X-Forwarded-For` and `X-Real-IP` are ignored.
 
 ```bash
-npm run deploy     # wrangler deploy; serves on workers.dev until the custom domain is enabled
+npm run deploy     # wrangler deploy → https://fleeting.chat and the workers.dev URL
 ```
 
-The custom domain is commented out in `wrangler.jsonc` (`"routes": [{ "pattern": "fleeting.chat", "custom_domain": true }]`).
-Enable it once the workers.dev deploy checks out.
+`wrangler.jsonc` attaches the custom domain `fleeting.chat` (Cloudflare manages its DNS record and certificate).
 
 ## Source
 
