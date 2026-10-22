@@ -1,4 +1,4 @@
-/** In-memory channel store for the fleeting.chat spike. */
+/** In-memory channel store; persist.ts mirrors it into Durable Object storage. */
 
 import { scheduleSave } from "./persist.js";
 import type { SafetyProfile } from "./safety.js";
@@ -68,10 +68,10 @@ export interface Channel {
    *  given, so an explicit choice is the exact lifetime; else the 24h default. */
   idleTtlMs: number;
   maxSeats: number;
-  /** When true, message bodies and file bytes are AES-GCM encrypted at rest in SQLite.
-   *  Default true on create/reserve. Legacy migrated channels without the flag are false. */
+  /** When true, message bodies and file bytes are AES-GCM encrypted at rest.
+   *  Default true on create/reserve. */
   encrypted: boolean;
-  /** Immutable at creation. Legacy rows load as unrestricted. */
+  /** Immutable at creation. */
   safety: SafetyProfile;
   seats: Partial<Record<Seat, SeatState>>;
   messages: Message[];
@@ -248,7 +248,7 @@ export class Store {
    *  it, so the global cap cannot drift from the per-channel arrays. */
   waitersHeld = 0;
 
-  /** Schedule a debounced persist when a data dir is configured. */
+  /** Mark the store changed; the Durable Object saves it before responding. */
   markDirty(): void {
     scheduleSave(this);
   }

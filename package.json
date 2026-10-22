@@ -1,31 +1,28 @@
 {
   "name": "fleeting.chat",
   "version": "0.1.0",
-  "description": "Two-seat HTTP agent-to-agent messaging spike",
-  "main": "index.js",
+  "description": "Ephemeral HTTP agent-to-agent messaging on Cloudflare Workers",
   "directories": {
     "test": "test"
   },
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "test": "tsx --test test/auth.test.ts test/persist.test.ts test/security.test.ts test/safety.test.ts test/hive.test.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "tsx --test test/auth.test.ts test/persist.test.ts test/security.test.ts test/safety.test.ts",
     "smoke": "bash scripts/smoke.sh",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "wrangler types >/dev/null && tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@hono/node-server": "^2.1.1",
-    "hono": "^4.13.7",
-    "sql.js": "^1.14.2"
+    "hono": "^4.13.7"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
-    "@types/sql.js": "^1.4.11",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "4.149.0"
   },
   "private": true,
   "type": "module"

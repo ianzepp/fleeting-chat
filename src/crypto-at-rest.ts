@@ -1,15 +1,17 @@
 /** At-rest protection for stored material (server-side).
  *
  * Message bodies and file bytes: optional AES-256-GCM, keyed by STORE_ENCRYPTION_KEY.
- * Bearer tokens: SHA-256 digests, so the database never holds a usable credential.
+ * Bearer tokens: SHA-256 digests, so storage never holds a usable credential.
  *
  * Not end-to-end: the process decrypts into the in-memory Store and serves plaintext
  * to authenticated clients. Opt out per channel with `encrypted: false`.
  *
- * Ciphertext format (opaque string stored in SQLite TEXT columns):
+ * Ciphertext format (opaque string in Durable Object storage records):
  *   "v1:" + base64(nonce || ciphertext || tag)
  * where nonce is 12 bytes, tag is 16 bytes (AES-GCM auth tag), and ciphertext is
  * the AES-256-GCM output for the UTF-8 body bytes or raw file bytes.
+ *
+ * Runs on Workers through the nodejs_compat node:crypto implementation.
  *
  * Master key: env STORE_ENCRYPTION_KEY = standard base64 encoding of exactly 32 bytes.
  */
@@ -27,7 +29,7 @@ const NONCE_LEN = 12;
 const TAG_LEN = 16;
 const KEY_LEN = 32;
 
-/** Marks a stored token as a digest rather than a legacy plaintext bearer. */
+/** Marks a stored token key as a digest. */
 const TOKEN_HASH_PREFIX = "sha256:";
 
 /** At-rest key for a bearer token. Tokens carry 256 bits of entropy, so a plain
@@ -35,12 +37,6 @@ const TOKEN_HASH_PREFIX = "sha256:";
  *  feasible preimage. */
 export function tokenDigest(token: string): string {
   return TOKEN_HASH_PREFIX + createHash("sha256").update(token).digest("base64url");
-}
-
-/** Digest for a stored token row. Rows written before token hashing hold the
- *  bearer itself; hashing them on load keeps those sessions working. */
-export function migrateStoredToken(stored: string): string {
-  return stored.startsWith(TOKEN_HASH_PREFIX) ? stored : tokenDigest(stored);
 }
 
 /** Parse STORE_ENCRYPTION_KEY; null if missing/invalid (not exactly 32 decoded bytes). */

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes, sign } from "node:crypto";
 import { createApp } from "../src/app.js";
 import { store, IP_RATE_LIMIT_PER_MIN, FILE_MAX_BYTES, FILE_MAX_PER_CHANNEL, MAX_TTL_SECONDS, MAX_MAX_SEATS } from "../src/store.js";
-import { ed25519PemPair, freshStore, joinWithProof, json, mintAgentTokenViaApi } from "./support.js";
+import { ed25519PemPair, freshStore, joinWithProof, json, LLMS_TXT, mintAgentTokenViaApi } from "./support.js";
 
 describe("fleeting.chat spike", () => {
   let prevEncKey: string | undefined;
@@ -21,7 +21,7 @@ describe("fleeting.chat spike", () => {
 
   it("create + join + send + poll", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
 
@@ -78,7 +78,7 @@ describe("fleeting.chat spike", () => {
 
   it("same pubkey re-join remints seat with proof and cannot take two seats", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
@@ -113,7 +113,7 @@ describe("fleeting.chat spike", () => {
 
   it("max_seats 3 allows two joins then channel_full; messages from seat 3", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const c = ed25519PemPair();
@@ -175,7 +175,7 @@ describe("fleeting.chat spike", () => {
 
   it("invalid max_seats 1 and 9 fail", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     for (const bad of [1, 9, 2.5, "3", null]) {
       const res = await json(app, "/v1/channels", {
@@ -190,7 +190,7 @@ describe("fleeting.chat spike", () => {
 
   it("ttl_seconds sets the channel lifetime on reserve and create", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
 
     const before = Date.now();
@@ -217,7 +217,7 @@ describe("fleeting.chat spike", () => {
 
   it("omitted ttl_seconds keeps the 48h absolute / 24h idle defaults", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await json(app, "/v1/channels/reserve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -232,7 +232,7 @@ describe("fleeting.chat spike", () => {
 
   it("a long ttl survives activity; touch never shortens below the chosen window", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await json(app, "/v1/channels/reserve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -247,7 +247,7 @@ describe("fleeting.chat spike", () => {
 
   it("out-of-range ttl_seconds fails on reserve and create", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     for (const bad of [0, 3599, 2_592_001, 1.5, "3600", true]) {
       const reserve = await json(app, "/v1/channels/reserve", {
@@ -270,7 +270,7 @@ describe("fleeting.chat spike", () => {
 
   it("extend +1d pushes absolute and returns reserve-shaped expiry fields", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -313,7 +313,7 @@ describe("fleeting.chat spike", () => {
 
   it("repeated extends reach the creation+30d ceiling then 409", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -361,7 +361,7 @@ describe("fleeting.chat spike", () => {
 
   it("extend clamps when the request overshoots the creation+30d ceiling", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -392,7 +392,7 @@ describe("fleeting.chat spike", () => {
 
   it("extend at the 30d ceiling returns 409 ttl_at_maximum", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -419,7 +419,7 @@ describe("fleeting.chat spike", () => {
 
   it("extend rejects invalid extend_by_seconds with 400 invalid_ttl", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -448,7 +448,7 @@ describe("fleeting.chat spike", () => {
 
   it("extend requires a channel bearer for that room", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
@@ -512,7 +512,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand_by 1 on max_seats 2 → 3; new join gets seat 3", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const cKey = ed25519PemPair();
@@ -567,7 +567,7 @@ describe("fleeting.chat spike", () => {
 
   it("repeated expands reach max_seats 8 then 409 seats_at_maximum", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -615,7 +615,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand clamps when the request overshoots max_seats 8", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -642,7 +642,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand at max_seats 8 returns 409 seats_at_maximum", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -669,7 +669,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand rejects invalid expand_by with 400 invalid_expand_by", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
       method: "POST",
@@ -698,7 +698,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand requires a channel bearer for that room", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
@@ -761,7 +761,7 @@ describe("fleeting.chat spike", () => {
 
   it("expand occupied field counts currently bound seats", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const created = await json(app, "/v1/channels", {
@@ -806,7 +806,7 @@ describe("fleeting.chat spike", () => {
 
   it("challenge / sign refresh", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -844,7 +844,7 @@ describe("fleeting.chat spike", () => {
 
   it("challenge replay fails", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -886,7 +886,7 @@ describe("fleeting.chat spike", () => {
 
   it("reserve empty → join seat 1 → join seat 2", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
 
@@ -926,7 +926,7 @@ describe("fleeting.chat spike", () => {
 
   it("reserve max_seats 3 → three joins then 409", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const keys = [ed25519PemPair(), ed25519PemPair(), ed25519PemPair(), ed25519PemPair()];
     const reserve = await json(app, "/v1/channels/reserve", {
       method: "POST",
@@ -960,7 +960,7 @@ describe("fleeting.chat spike", () => {
 
   it("reserved channel stays pubkey-less until bind; auth requires seat", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const reserve = await json(app, "/v1/channels/reserve", {
       method: "POST",
@@ -999,7 +999,7 @@ describe("fleeting.chat spike", () => {
 
   it("invalid max_seats on reserve", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     for (const bad of [1, 9, 2.5, "3", null]) {
       const res = await json(app, "/v1/channels/reserve", {
         method: "POST",
@@ -1012,7 +1012,7 @@ describe("fleeting.chat spike", () => {
   });
 
   it("healthz and llms.txt", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const h = await app.request("/healthz");
     assert.equal(h.status, 200);
     assert.equal(await h.text(), "ok");
@@ -1029,7 +1029,7 @@ describe("fleeting.chat spike", () => {
   });
 
   it("static noise routes: robots favicon and cheeky wp 402", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const robots = await app.request("/robots.txt");
     assert.equal(robots.status, 200);
     assert.match(await robots.text(), /Allow:\s*\//);
@@ -1044,7 +1044,7 @@ describe("fleeting.chat spike", () => {
   });
 
   it("landing page 200 contains Generate", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await app.request("/");
     assert.equal(res.status, 200);
     const html = await res.text();
@@ -1062,7 +1062,7 @@ describe("fleeting.chat spike", () => {
 
   it("GET /join?id= share page 200; no store bind; invalid 400", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const beforeChannels = store.channels.size;
     const beforeUsed = store.usedChannelIds.size;
 
@@ -1104,7 +1104,7 @@ describe("fleeting.chat spike", () => {
 
   it("security headers on API response", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1119,7 +1119,7 @@ describe("fleeting.chat spike", () => {
 
   it("rejects invalid channel id", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     for (const bad of ["NOT-VALID", "coral-lantern", "12-345-678", "bad_id"]) {
       const join = await json(app, `/v1/channels/${bad}/join`, {
@@ -1145,7 +1145,7 @@ describe("fleeting.chat spike", () => {
 
   it("valid join path with generated digit channel id", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const reserve = await json(app, "/v1/channels/reserve", {
@@ -1176,7 +1176,7 @@ describe("fleeting.chat spike", () => {
 
   it("join accepts undashed 9-digit form same as canonical", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const reserve = await json(app, "/v1/channels/reserve", {
@@ -1221,7 +1221,7 @@ describe("fleeting.chat spike", () => {
 
   it("normalize rejects wrong digit counts and word-word", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     for (const bad of ["coral-lantern", "12-345-678", "12345678", "1234567890", "abc"]) {
       const join = await json(app, `/v1/channels/${encodeURIComponent(bad)}/join`, {
@@ -1237,7 +1237,7 @@ describe("fleeting.chat spike", () => {
 
   it("rejects unsupported media type", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const res = await json(app, "/v1/channels", {
       method: "POST",
@@ -1250,7 +1250,7 @@ describe("fleeting.chat spike", () => {
 
   it("rejects oversized body", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1272,7 +1272,7 @@ describe("fleeting.chat spike", () => {
 
   it("rejects oversized raw Content-Length before parse", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await app.request("/v1/channels", {
       method: "POST",
       headers: {
@@ -1288,7 +1288,7 @@ describe("fleeting.chat spike", () => {
 
   it("marks usedChannelIds on create", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1302,7 +1302,7 @@ describe("fleeting.chat spike", () => {
 
   it("nick on create/join echoed; messages include nick; remint updates nick", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
 
@@ -1379,7 +1379,7 @@ describe("fleeting.chat spike", () => {
 
   it("invalid nick length and empty-after-trim rejected", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
 
     const tooLong = "x".repeat(65);
@@ -1447,7 +1447,7 @@ describe("fleeting.chat spike", () => {
 
   it("message without seat nick omits nick field", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1471,33 +1471,25 @@ describe("fleeting.chat spike", () => {
 
   it("ip rate limit returns 429 without being flaky", async () => {
     freshStore();
-    // Forwarded identities are only believed behind a declared proxy.
-    const prevTrustProxy = process.env.TRUST_PROXY;
-    process.env.TRUST_PROXY = "1";
-    try {
-      const app = createApp();
-      const a = ed25519PemPair();
-      // Directly saturate the IP window instead of issuing 30+ real creates
-      store.ipRate.set("203.0.113.9", { start: Date.now(), count: IP_RATE_LIMIT_PER_MIN });
-      const res = await json(app, "/v1/channels", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Forwarded-For": "203.0.113.9",
-        },
-        body: JSON.stringify({ public_key_pem: a.publicPem }),
-      });
-      assert.equal(res.status, 429);
-      assert.equal(res.body.error, "rate_limited");
-    } finally {
-      if (prevTrustProxy === undefined) delete process.env.TRUST_PROXY;
-      else process.env.TRUST_PROXY = prevTrustProxy;
-    }
+    const app = createApp(LLMS_TXT);
+    const a = ed25519PemPair();
+    // Directly saturate the IP window instead of issuing 30+ real creates
+    store.ipRate.set("203.0.113.9", { start: Date.now(), count: IP_RATE_LIMIT_PER_MIN });
+    const res = await json(app, "/v1/channels", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "203.0.113.9",
+      },
+      body: JSON.stringify({ public_key_pem: a.publicPem }),
+    });
+    assert.equal(res.status, 429);
+    assert.equal(res.body.error, "rate_limited");
   });
 
   it("file upload/download roundtrip base64 (whitespace ok)", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1550,7 +1542,7 @@ describe("fleeting.chat spike", () => {
 
   it("file oversized decoded → 413 file_too_large", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1577,7 +1569,7 @@ describe("fleeting.chat spike", () => {
 
   it("11th file → 409 file_limit", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1612,7 +1604,7 @@ describe("fleeting.chat spike", () => {
 
   it("expired file → 404 file_not_found", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1648,7 +1640,7 @@ describe("fleeting.chat spike", () => {
 
   it("file endpoints require auth; reject path filename and bad ttl", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1706,7 +1698,7 @@ describe("fleeting.chat spike", () => {
 
   it("agent auth mint + ping lists only channels with activity after since", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const agent = ed25519PemPair();
     const other = ed25519PemPair();
 
@@ -1768,7 +1760,7 @@ describe("fleeting.chat spike", () => {
 
   it("ping rejects channel token with agent_token_required", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const create = await json(app, "/v1/channels", {
       method: "POST",
@@ -1790,7 +1782,7 @@ describe("fleeting.chat spike", () => {
 
   it("ping rejects bad/missing since", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const agentToken = await mintAgentTokenViaApi(app, a);
 
@@ -1810,7 +1802,7 @@ describe("fleeting.chat spike", () => {
 
   it("ping returns empty list when no seats or no new content", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const agentToken = await mintAgentTokenViaApi(app, a);
 
@@ -1847,7 +1839,7 @@ describe("fleeting.chat spike", () => {
 
   it("agent challenge replay fails", async () => {
     freshStore();
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const ch = await json(app, "/v1/auth/agent/challenge", {
       method: "POST",

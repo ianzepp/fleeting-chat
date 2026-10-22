@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fleeting-chat",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  // node:crypto (AES-256-GCM, Ed25519, SHA-256), Buffer, and process.env from bindings.
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "CHAT", "class_name": "FleetingChat" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FleetingChat"] }]
+  // Custom domain: enable after the first deploy is verified on workers.dev.
+  // "routes": [{ "pattern": "fleeting.chat", "custom_domain": true }]
+}

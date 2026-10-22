@@ -2,10 +2,15 @@
 
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { createApp } from "../src/app.js";
+import type { KvStorage } from "../src/persist.js";
 import { store } from "../src/store.js";
 
 export type App = ReturnType<typeof createApp>;
+
+/** The guide the Worker bundles; tests hand it to createApp the same way. */
+export const LLMS_TXT = readFileSync(new URL("../llms.txt", import.meta.url), "utf8");
 
 export interface PemPair {
   publicPem: string;
@@ -26,6 +31,33 @@ export function freshStore(): void {
   store.moderationActions.clear();
   store.usedChannelIds.clear();
   store.ipRate.clear();
+}
+
+/** Stand-in for a Durable Object's `ctx.storage.kv`: values are structured-cloned
+ *  on write, as the runtime does, and listed in key order. */
+export class MemoryKv implements KvStorage {
+  readonly rows = new Map<string, unknown>();
+  puts = 0;
+
+  list<T>(): Iterable<[string, T]> {
+    return [...this.rows.entries()].sort(([a], [b]) => (a < b ? -1 : 1)) as [string, T][];
+  }
+
+  put<T>(key: string, value: T): void {
+    this.puts += 1;
+    this.rows.set(key, structuredClone(value));
+  }
+
+  delete(key: string): boolean {
+    return this.rows.delete(key);
+  }
+
+  /** Everything stored, as one string, for "is this plaintext on disk" checks. */
+  dump(): string {
+    return JSON.stringify([...this.rows], (_k, v) =>
+      v instanceof Uint8Array ? Buffer.from(v).toString("latin1") : v
+    );
+  }
 }
 
 export function ed25519PemPair(): PemPair {

@@ -26,6 +26,7 @@ import {
   html,
   joinWithProof,
   json,
+  LLMS_TXT,
   mintAgentTokenViaApi,
   mintSeatTokenViaSignature,
   postJson,
@@ -78,7 +79,7 @@ describe("share-page origin (BH-HEADERS-001)", () => {
   });
 
   it("ignores X-Forwarded-Host instead of printing it as the agent's fetch target", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await html(app, "/join?id=123-456-789", {
       headers: {
         Host: "fleeting.chat",
@@ -93,7 +94,7 @@ describe("share-page origin (BH-HEADERS-001)", () => {
 
   it("uses PUBLIC_ORIGIN when configured", async () => {
     process.env.PUBLIC_ORIGIN = "https://fleeting.chat";
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await html(app, "/join?id=123-456-789", { headers: { Host: "attacker.example" } });
     assert.match(agentInstruction(res.body), /^https:\/\/fleeting\.chat\/llms\.txt/);
     assert.ok(!res.body.includes("attacker.example"));
@@ -101,7 +102,7 @@ describe("share-page origin (BH-HEADERS-001)", () => {
 
   it("ignores a PUBLIC_ORIGIN that is not an http(s) URL", async () => {
     process.env.PUBLIC_ORIGIN = "javascript:alert(1)";
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await html(app, "/join?id=123-456-789", {
       headers: { Host: "fleeting.chat", "X-Forwarded-Proto": "https" },
     });
@@ -110,7 +111,7 @@ describe("share-page origin (BH-HEADERS-001)", () => {
   });
 
   it("takes only the scheme from forwarding headers, never the host", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await html(app, "/join?id=123-456-789", {
       headers: { Host: "fleeting.chat", "X-Forwarded-Proto": "https" },
     });
@@ -126,7 +127,7 @@ describe("share-page origin (BH-HEADERS-001)", () => {
   });
 
   it("still renders when Host is malformed", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await html(app, "/join?id=123-456-789", {
       headers: { Host: "[", "X-Forwarded-Host": "attacker.example" },
     });
@@ -141,7 +142,7 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   const PIXEL = "aGk="; // "hi"
 
   it("rejects a content_type past the metadata cap", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     const res = await upload(app, channel, {
       filename: "note.txt",
@@ -153,7 +154,7 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   });
 
   it("rejects a content_type that is not a media type", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     for (const content_type of [
       "not a media type",
@@ -170,7 +171,7 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   });
 
   it("keeps a normal media type, parameters included", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     const res = await upload(app, channel, {
       filename: "note.txt",
@@ -182,7 +183,7 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   });
 
   it("rejects control characters in a filename", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     for (const filename of ["a\nb.txt", "a\u0000b.txt", "a\u001b[31m.txt"]) {
       const res = await upload(app, channel, { filename, content_base64: PIXEL });
@@ -192,7 +193,7 @@ describe("file metadata bounds (BH-INPUT-001)", () => {
   });
 
   it("still accepts a non-ASCII filename", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     const res = await upload(app, channel, { filename: "résumé.pdf", content_base64: PIXEL });
     assert.equal(res.status, 201, JSON.stringify(res.body));
@@ -210,7 +211,7 @@ describe("seat token rotation (BH-AUTH-003)", () => {
   }
 
   it("invalidates the previous token when a seat re-joins", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const pair = ed25519PemPair();
     const { id, token: first } = await createSeatOne(app, pair);
 
@@ -226,7 +227,7 @@ describe("seat token rotation (BH-AUTH-003)", () => {
   });
 
   it("invalidates the previous token when a seat refreshes via challenge/sign", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const pair = ed25519PemPair();
     const { id, token: first } = await createSeatOne(app, pair);
 
@@ -253,7 +254,7 @@ describe("challenge endpoint disclosure (BH-AUTH-002)", () => {
   }
 
   it("answers identically whether or not the pubkey holds a seat", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id, owner } = await channelWithOwner(app);
     const stranger = ed25519PemPair();
 
@@ -277,7 +278,7 @@ describe("challenge endpoint disclosure (BH-AUTH-002)", () => {
   });
 
   it("still refuses a token exchange for a key that holds no seat", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id } = await channelWithOwner(app);
     const stranger = ed25519PemPair();
 
@@ -308,7 +309,7 @@ describe("file upload throttling (BH-DOS-006)", () => {
   beforeEach(() => freshStore());
 
   it("throttles a per-client upload flood", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     const codes: Record<number, number> = {};
     for (let i = 0; i < 40; i++) {
@@ -319,7 +320,7 @@ describe("file upload throttling (BH-DOS-006)", () => {
   });
 
   it("still allows a normal ten-file upload", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     for (let i = 0; i < 10; i++) {
       const res = await upload(app, channel, { filename: `f${i}.txt`, content_base64: "aGk=" });
@@ -352,7 +353,7 @@ describe("seat takeover via re-join (BH-AUTH-001)", () => {
   }
 
   it("refuses to mint a seat token from a known public key alone", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id, victim, token } = await victimSetup(app);
 
     const stolen = await json(
@@ -370,7 +371,7 @@ describe("seat takeover via re-join (BH-AUTH-001)", () => {
   });
 
   it("refuses a re-join whose signature does not verify", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id, victim, token } = await victimSetup(app);
     const attacker = ed25519PemPair();
 
@@ -400,7 +401,7 @@ describe("seat takeover via re-join (BH-AUTH-001)", () => {
   });
 
   it("lets the key holder re-join with a signed challenge and evicts the old bearer", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id, victim, token } = await victimSetup(app);
 
     const rejoin = await joinWithProof(app, id, victim, { nick: "renamed" });
@@ -417,7 +418,7 @@ describe("seat takeover via re-join (BH-AUTH-001)", () => {
   });
 
   it("still binds a free seat from the channel id alone", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const { id } = await victimSetup(app);
     const peer = ed25519PemPair();
 
@@ -456,7 +457,7 @@ describe("long-poll admission (BH-DOS-002)", () => {
   }
 
   it("refuses a poll beyond the per-channel waiter cap and releases capacity after", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     const held = [];
     for (let i = 0; i < MAX_WAITERS_PER_CHANNEL; i++) {
@@ -480,7 +481,7 @@ describe("long-poll admission (BH-DOS-002)", () => {
   });
 
   it("refuses a poll once the global waiter budget is spent", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const channel = await newChannel(app);
     store.waitersHeld = MAX_TOTAL_WAITERS;
 
@@ -500,27 +501,16 @@ describe("long-poll admission (BH-DOS-002)", () => {
 });
 
 describe("client identity for throttling (BH-RATE-001)", () => {
-  let prevTrustProxy: string | undefined;
+  beforeEach(() => freshStore());
 
-  beforeEach(() => {
-    prevTrustProxy = process.env.TRUST_PROXY;
-    delete process.env.TRUST_PROXY;
-    freshStore();
-  });
-
-  afterEach(() => {
-    if (prevTrustProxy === undefined) delete process.env.TRUST_PROXY;
-    else process.env.TRUST_PROXY = prevTrustProxy;
-  });
-
-  /** One request per forged identity, as an attacker would rotate it. */
-  async function reserveFlood(app: App, attempts: number) {
+  /** One request per identity, rotating the given header as an attacker would. */
+  async function reserveFlood(app: App, attempts: number, header: string) {
     const codes: Record<number, number> = {};
     for (let i = 0; i < attempts; i++) {
       const res = await json(
         app,
         "/v1/channels/reserve",
-        postJson({ encrypted: false }, { "X-Forwarded-For": `203.0.113.${i % 250}` })
+        postJson({ encrypted: false }, { [header]: `203.0.113.${i % 250}` })
       );
       codes[res.status] = (codes[res.status] ?? 0) + 1;
     }
@@ -528,23 +518,21 @@ describe("client identity for throttling (BH-RATE-001)", () => {
   }
 
   it("does not let a rotating X-Forwarded-For mint fresh rate-limit buckets", async () => {
-    const app = createApp();
-    const codes = await reserveFlood(app, IP_RATE_LIMIT_PER_MIN + 5);
+    const app = createApp(LLMS_TXT);
+    const codes = await reserveFlood(app, IP_RATE_LIMIT_PER_MIN + 5, "X-Forwarded-For");
     assert.ok(
       codes[429] >= 1,
       `spoofed forwarded headers bypassed throttling: ${JSON.stringify(codes)}`
     );
   });
 
-  it("honours forwarded headers when the deployment declares a trusted proxy", async () => {
-    process.env.TRUST_PROXY = "1";
-    freshStore();
-    const app = createApp();
-    const codes = await reserveFlood(app, 40);
+  it("buckets by CF-Connecting-IP, which Cloudflare's edge sets", async () => {
+    const app = createApp(LLMS_TXT);
+    const codes = await reserveFlood(app, 40, "CF-Connecting-IP");
     assert.equal(
       codes[429],
       undefined,
-      `trusted-proxy mode throttled a legitimate rotation: ${JSON.stringify(codes)}`
+      `distinct edge addresses shared a bucket: ${JSON.stringify(codes)}`
     );
   });
 });
@@ -573,7 +561,7 @@ describe("request body limits (BH-BODY-001)", () => {
   const streamed: RequestInit & { duplex: "half" } = { duplex: "half" };
 
   it("stops reading a chunked body once the cap is crossed", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const total = RAW_BODY_MAX_BYTES * 32;
     const flood = floodStream(total);
     const init: RequestInit = {
@@ -593,7 +581,7 @@ describe("request body limits (BH-BODY-001)", () => {
   });
 
   it("still accepts a valid body through the same path", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const res = await json(
       app,
       "/v1/channels/reserve",
@@ -608,7 +596,7 @@ describe("request-path cost and expiry (BH-DOS-003)", () => {
   beforeEach(() => freshStore());
 
   it("throttles /v1/ping per client", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const agent = ed25519PemPair();
     const agentToken = await mintAgentTokenViaApi(app, agent);
     const since = new Date(Date.now() - 3_600_000).toISOString();
@@ -622,7 +610,7 @@ describe("request-path cost and expiry (BH-DOS-003)", () => {
   });
 
   it("expires channels and bearers lazily, without a request-time sweep", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
 
     const channelOwner = ed25519PemPair();
     const created = await json(app, "/v1/channels", postJson({ public_key_pem: channelOwner.publicPem }));
@@ -672,7 +660,7 @@ describe("channel id memory (BH-DOS-001)", () => {
   });
 
   it("still issues ids after eviction", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     for (let i = 0; i < MAX_USED_CHANNEL_IDS; i++) {
       store.rememberChannelId(`filler-${i}`);
     }

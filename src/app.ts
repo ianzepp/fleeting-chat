@@ -1,7 +1,4 @@
 import { Hono } from "hono";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import {
   store,
@@ -59,7 +56,6 @@ import {
 import { generateChannelId } from "./ids.js";
 import { FAVICON_SVG, LANDING_HTML, joinErrorHtml, joinShareHtml } from "./pages.js";
 import { encryptionAvailable } from "./crypto-at-rest.js";
-import { flushStore } from "./persist.js";
 import {
   parseSafetyProfile,
   reportRetentionMs,
@@ -68,14 +64,6 @@ import {
   scanStoreV1Message,
   termsAccepted,
 } from "./safety.js";
-import { hiveHealth, shadowChannelCreated, shadowMessageSent } from "./hive/index.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..");
-
-function loadLlmsTxt(): string {
-  return readFileSync(join(ROOT, "llms.txt"), "utf8");
-}
 
 const ALLOWED_ORIGIN_PROTOCOLS = new Set(["http:", "https:"]);
 
@@ -143,45 +131,11 @@ function setPublicCors(c: { header: (k: string, v: string) => void }) {
   c.header("Access-Control-Allow-Headers", "Content-Type");
 }
 
-/** Whether forwarded client-IP headers may be believed. Off unless the deployment
- *  says otherwise: only a proxy that rewrites them (Railway overwrites X-Real-IP
- *  and strips a client-supplied X-Forwarded-For) makes them trustworthy, and
- *  believing them by default lets a caller choose its own rate-limit bucket. */
-function trustProxyHeaders(): boolean {
-  const raw = process.env.TRUST_PROXY?.trim().toLowerCase();
-  return raw === "1" || raw === "true";
-}
-
-/** Real peer address from the Node adapter; null for an in-process request. */
-function socketAddress(env: unknown): string | null {
-  if (typeof env !== "object" || env === null) return null;
-  const incoming = (env as { incoming?: unknown }).incoming;
-  if (typeof incoming !== "object" || incoming === null) return null;
-  const socket = (incoming as { socket?: unknown }).socket;
-  if (typeof socket !== "object" || socket === null) return null;
-  const remoteAddress = (socket as { remoteAddress?: unknown }).remoteAddress;
-  return typeof remoteAddress === "string" && remoteAddress ? remoteAddress : null;
-}
-
-function forwardedClientIp(req: { header: (n: string) => string | undefined }): string | null {
-  const real = req.header("x-real-ip")?.trim();
-  if (real) return real;
-  const first = req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  return first ? first : null;
-}
-
-/** Rate-limit identity. Behind a declared proxy the forwarded address is used
- *  (X-Real-IP first, since that is the one Railway overwrites); otherwise only the
- *  socket address is trusted, because that is the one value a client cannot pick. */
-function clientIp(c: {
-  env?: unknown;
-  req: { header: (n: string) => string | undefined };
-}): string {
-  if (trustProxyHeaders()) {
-    const forwarded = forwardedClientIp(c.req);
-    if (forwarded) return forwarded;
-  }
-  return socketAddress(c.env) ?? "unknown";
+/** Rate-limit identity. Cloudflare's edge sets CF-Connecting-IP and overwrites
+ *  any client-supplied value, so it is the one address a caller cannot pick.
+ *  Forwarded headers (X-Forwarded-For, X-Real-IP) are client-controlled and ignored. */
+function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
+  return c.req.header("cf-connecting-ip")?.trim() || "unknown";
 }
 
 function contentTypeIsJson(ct: string | undefined): boolean {
@@ -498,17 +452,11 @@ function clearWaiter(
 }
 
 
-/** Replace a seat's bearer: revoke the old one, mint the new one, and persist both
- *  before the caller answers.
- *
- *  This is security-relevant state and a save is otherwise debounced, so leaving it
- *  in the window means a hard kill (SIGKILL, power loss) could restore a bearer the
- *  holder had explicitly retired. One awaited write covers both halves of the swap. */
-async function rotateSeatToken(channelId: string, seat: Seat): Promise<MintedToken> {
+/** Replace a seat's bearer: revoke the old one and mint the new one. The Durable
+ *  Object saves both halves of the swap before the response leaves. */
+function rotateSeatToken(channelId: string, seat: Seat): MintedToken {
   revokeSeatTokens(channelId, seat);
-  const tok = mintToken(channelId, seat);
-  await flushStore(store);
-  return tok;
+  return mintToken(channelId, seat);
 }
 
 function isValidFilename(name: string): boolean {
@@ -536,11 +484,12 @@ function parseTtlSeconds(raw: unknown): { ok: true; value: number } | { ok: fals
   return { ok: true, value: raw };
 }
 
-export function createApp(): Hono {
+/** `llmsTxt` is the agent guide served at /llms.txt (bundled by the Worker). */
+export function createApp(llmsTxt: string): Hono {
   const app = new Hono();
 
   // Expiry is handled lazily (getChannel and the bearer resolvers drop what they
-  // touch) plus the periodic sweep in index.ts. Sweeping the whole store on every
+  // touch) plus the Durable Object's periodic sweep alarm. Sweeping the whole store on every
   // request made anonymous traffic cost O(store), so it is deliberately absent here.
 
   // Global security headers on all responses; API JSON also gets no-store via helpers.
@@ -616,15 +565,6 @@ export function createApp(): Hono {
     return c.body(null, 204);
   });
 
-  /** Operator-only reachability. Same moderator gate as /v1/moderation/*. */
-  app.get("/v1/_hive/health", async (c) => {
-    if (!moderatorAuthorized(c.req.header("Authorization"))) {
-      return jsonError(c, 403, "moderator_unauthorized");
-    }
-    setApiSecurityHeaders(c);
-    return c.json(await hiveHealth());
-  });
-
   app.get("/robots.txt", (c) => {
     setPublicCors(c);
     c.header("Content-Type", "text/plain; charset=utf-8");
@@ -671,7 +611,7 @@ export function createApp(): Hono {
   app.get("/llms.txt", (c) => {
     setPublicCors(c);
     c.header("Content-Type", "text/plain; charset=utf-8");
-    return c.body(loadLlmsTxt());
+    return c.body(llmsTxt);
   });
 
   app.options("/llms.txt", (c) => {
@@ -682,7 +622,7 @@ export function createApp(): Hono {
   app.get("/.well-known/llms.txt", (c) => {
     setPublicCors(c);
     c.header("Content-Type", "text/plain; charset=utf-8");
-    return c.body(loadLlmsTxt());
+    return c.body(llmsTxt);
   });
 
   app.options("/.well-known/llms.txt", (c) => {
@@ -760,11 +700,6 @@ export function createApp(): Hono {
     };
     store.channels.set(id, ch);
     store.markDirty();
-    shadowChannelCreated({
-      channelId: id,
-      createdAt: new Date(now).toISOString(),
-      encrypted: ch.encrypted,
-    });
     setApiSecurityHeaders(c);
     return c.json({
       channel_id: id,
@@ -860,12 +795,6 @@ export function createApp(): Hono {
     store.channels.set(id, ch);
     store.markDirty();
     const tok = mintToken(id, "1", now);
-    shadowChannelCreated({
-      channelId: id,
-      createdAt: new Date(now).toISOString(),
-      encrypted: ch.encrypted,
-      seat: "1",
-    });
     setApiSecurityHeaders(c);
     const resp: Record<string, unknown> = {
       channel_id: id,
@@ -950,7 +879,7 @@ export function createApp(): Hono {
           delete seatState.nick;
         }
       }
-      const tok = await rotateSeatToken(id, existing);
+      const tok = rotateSeatToken(id, existing);
       store.touchIdle(ch);
       setApiSecurityHeaders(c);
       return c.json({ ...seatPayload(existing, tok, ch.maxSeats, seatState.nick), safety: safetyPayload(ch) });
@@ -1129,7 +1058,7 @@ export function createApp(): Hono {
     if (!verifyEd25519Signature(body.public_key_pem, body.challenge, body.signature_base64)) {
       return jsonError(c, 401, "invalid_signature");
     }
-    const tok = await rotateSeatToken(channelId, seat);
+    const tok = rotateSeatToken(channelId, seat);
     store.touchIdle(ch);
     setApiSecurityHeaders(c);
     return c.json({
@@ -1302,14 +1231,6 @@ export function createApp(): Hono {
 
     store.touchIdle(ch);
     const msg = appendMessage(ch, tok.seat, body.body);
-    shadowMessageSent({
-      channelId: id,
-      messageId: msg.id,
-      seat: tok.seat,
-      createdAt: msg.ts,
-      encrypted: ch.encrypted,
-      body: body.body,
-    });
     setApiSecurityHeaders(c);
     return c.json({ message: messagePayload(msg) }, 201);
   });

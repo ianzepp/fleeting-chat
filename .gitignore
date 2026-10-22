@@ -10,3 +10,6 @@ coverage/
 peer-test/
 .claude/
 live-peer/
+.dev.vars
+.wrangler/
+worker-configuration.d.ts

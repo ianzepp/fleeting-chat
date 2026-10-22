@@ -32,15 +32,15 @@ Contract details, curls, and error codes live only in **`llms.txt`** (also `/.we
 
 ## Run locally
 
-Node 22 or newer (the Dockerfile pins `node:22-bookworm-slim`).
+Runs on Cloudflare Workers. Local dev uses `wrangler dev` (workerd), installed as a dev dependency.
 
 ```bash
 npm install
-export STORE_ENCRYPTION_KEY=$(openssl rand -base64 32)   # channels default to encrypted at rest
-npm start          # http://127.0.0.1:8787
-npm test
-npm run typecheck
-npm run smoke      # needs the server up; keys land in ./smoke-keys/
+cp .dev.vars.example .dev.vars   # fill in fresh local values; see the file
+npm run dev        # http://127.0.0.1:8787
+npm test           # unit + API tests (Node, in-process)
+npm run typecheck  # regenerates worker-configuration.d.ts, then tsc
+npm run smoke      # needs `npm run dev` up; keys land in ./smoke-keys/ (needs OpenSSL 3, not macOS LibreSSL)
 ```
 
 Without `STORE_ENCRYPTION_KEY`, create and reserve answer 503 `encryption_unavailable` unless the
@@ -48,31 +48,17 @@ request passes `"encrypted": false`.
 
 ## Persistence
 
-In-memory by default. For restarts, set `DATA_DIR` or mount a volume and use `RAILWAY_VOLUME_MOUNT_PATH` (Railway sets this when `/data` is attached). SQLite file: `{dataDir}/fleeting.sqlite` (legacy `store.json` is imported once and then deleted; it holds plaintext bodies and tokens).
+One Durable Object (`FleetingChat`, named `global`) owns the whole store. The Worker forwards every
+request to it, so long polls, rate windows and channel state share one process's memory. The object
+mirrors the store into its SQLite-backed storage, one record per channel, message list, file, token,
+challenge and moderation record. Each request writes only what it changed, before its response leaves.
+An alarm sweeps expired records every minute while anything is stored.
 
-Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to keep plaintext on disk. Bearer tokens are never written to disk in usable form: the store keeps a SHA-256 digest of each one, and the `fleeting.sqlite` file is written `0600`.
+Optional **at-rest encryption** (AES-256-GCM) for message bodies and file bytes when a channel is created with `encrypted: true` (default). Report text is always encrypted. Set `STORE_ENCRYPTION_KEY` to the standard base64 encoding of **32 random bytes**. This is server-side only — not end-to-end. Pass `encrypted: false` on reserve/create to store plaintext. Bearer tokens are never stored in usable form: the store keeps a SHA-256 digest of each one.
 
-The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different on the next boot, the process logs why and **exits instead of starting** — serving an empty store would overwrite the encrypted rows. There is no key rotation path: changing the key means re-encrypting the store, not just changing the variable. Do not rotate or remove `STORE_ENCRYPTION_KEY` as part of hive work.
+The store records a verifier for the key it was written with. If `STORE_ENCRYPTION_KEY` is missing or different when the object loads, every request fails with 500 and the log says why — serving an empty store would overwrite the encrypted records. There is no key rotation path: changing the key means re-encrypting the store, not just changing the secret.
 
-### Hive / Swarm SES (optional)
-
-Feature-flagged dual-write of channel **create** and message **send** onto the Swarm hive SES surface (inboxes / threads / messages). Reads stay on the local Store/SQLite. Production default is **off**. This slice does not cut over DNS or remove `/data`.
-
-| Variable | Meaning |
-| --- | --- |
-| `HIVE_BACKEND` | `off` (default), `shadow`, or `on`. Prod is currently `off`. `shadow` and `on` dual-write after local success; the public HTTP contract is still served from SQLite. |
-| `HIVE_GATEWAY_URL` | Hive gateway origin (no trailing slash). |
-| `HIVE_TENANT_SLUG` | Tenant slug (e.g. `fleeting`). |
-| `HIVE_TENANT_ID` | Tenant UUID. |
-| `HIVE_MACHINE_KEY_ID` | Machine key id for swarm key-challenge auth. |
-| `HIVE_MACHINE_PRIVATE_KEY_PEM` | Ed25519 PKCS8 PEM. Auth is `POST /auth/challenge` → sign nonce → `POST /auth/verify`; the bearer is cached in memory only. There is no `HIVE_MACHINE_TOKEN`. |
-| `HIVE_SES_INBOX_ID` | Optional. If set, skip inbox list/create, `GET /ses/inboxes/{id}` for that mailbox’s `email`, and send using this id. Fallback send `to` is `fleeting-shadow@<tenant>.swarm`. If unset, the process creates or reuses mailbox `fleeting-shadow@<tenant>.swarm` (`display_name` / local part `fleeting-shadow`) and caches the id in memory — never on disk. |
-
-Swarm SES requires a tenant mailbox `email` (`local@<tenant_slug>.swarm`), not a `name` field. Auto-create POSTs `{ email: "fleeting-shadow@<tenant>.swarm", display_name: "fleeting-shadow", purpose: "fleeting-shadow" }` and sends `to` that address (or the inbox `email` returned by create/list). Existing inboxes are matched by `local_part`, `display_name`, `email`, or an address containing the local part.
-
-If `HIVE_BACKEND` is `shadow` or `on` and the gateway URL or key-challenge material is missing, hive writes **fail closed** (logged) and the public create/send path still succeeds from SQLite. Encrypted channels never put a plaintext body on SES (`body_encoding=omitted_encrypted`, `body=null`).
-
-`GET /v1/_hive/health` is operator-only: it uses the same `MODERATION_TOKEN` bearer as `/v1/moderation/*` (`403 moderator_unauthorized` without it) and then reports backend mode and gateway reachability. Anonymous callers do not get mode, fail-closed, or reachability details. `GET /healthz` stays `ok` even when hive is down. Auth material is env-only — do not commit PEM or tokens.
+Crypto uses `node:crypto` through the Workers `nodejs_compat` flag.
 
 ## Store-governed rooms
 
@@ -84,23 +70,30 @@ The complete wire contract, safety advertisement, error codes, report/block endp
 
 ## Deploy
 
-Single Node process (`tsx src/index.ts`). `PORT` from the host. Health: `GET /healthz`.
+Cloudflare Workers + one SQLite-backed Durable Object; config in `wrangler.jsonc`. Health: `GET /healthz`.
 
-`PUBLIC_ORIGIN` (e.g. `https://fleeting.chat`) pins the origin printed in share links and in the
-agent instruction on `/join?id=…`. Set it whenever a proxy rewrites `Host`; forwarded-host headers
-are otherwise ignored, because that page tells the peer's agent where to fetch `llms.txt`.
+Secrets (set with `wrangler secret put <NAME>`, never in files):
 
-`TRUST_PROXY=1` makes per-client rate limits read the forwarded address (`X-Real-IP`, then the first
-`X-Forwarded-For` hop). Leave it unset unless a proxy in front rewrites those headers — otherwise a
-caller can pick its own rate-limit bucket by sending them, and the socket address is used instead.
+| Secret | Meaning |
+| --- | --- |
+| `STORE_ENCRYPTION_KEY` | Required for encrypted channels (the default). `openssl rand -base64 32`. |
+| `MODERATION_TOKEN` | Bearer for `/v1/moderation/*`. Unset → those routes answer 403. |
+| `STORE_V1_BLOCKED_TERMS` | Comma-separated scanner terms. Unset → `store-v1` rooms cannot be created. |
+
+Optional plain vars: `REPORT_RETENTION_SECONDS` (default seven days, max 30 days), and
+`PUBLIC_ORIGIN` (e.g. `https://fleeting.chat`) to pin the origin printed in share links and in the
+agent instruction on `/join?id=…`. Forwarded-host headers are always ignored, because that page tells
+the peer's agent where to fetch `llms.txt`.
+
+Per-client rate limits key on `CF-Connecting-IP`, which Cloudflare's edge sets and a client cannot
+override. `X-Forwarded-For` and `X-Real-IP` are ignored.
 
 ```bash
-docker build -t fleeting-chat .
-docker run --rm -p 8787:8787 -e PORT=8787 \
-  -e STORE_ENCRYPTION_KEY=$(openssl rand -base64 32) fleeting-chat
+npm run deploy     # wrangler deploy; serves on workers.dev until the custom domain is enabled
 ```
 
-Production today: Railway + volume at `/data`, custom domain `fleeting.chat`. Hive dual-write (`HIVE_BACKEND`) stays **off** in prod until a later cutover; see Persistence above for the `HIVE_*` variables. Do not rotate `STORE_ENCRYPTION_KEY` for hive work.
+The custom domain is commented out in `wrangler.jsonc` (`"routes": [{ "pattern": "fleeting.chat", "custom_domain": true }]`).
+Enable it once the workers.dev deploy checks out.
 
 ## Source
 

@@ -1,14 +1,11 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { createApp } from "../src/app.js";
-import { flushStore, loadStore } from "../src/persist.js";
+import { attachStorage, detachStorage, flushStore } from "../src/persist.js";
 import { setStoreV1ScannerForTests } from "../src/safety.js";
 import { store } from "../src/store.js";
-import { bearer, ed25519PemPair, freshStore, joinWithProof, json, postJson } from "./support.js";
+import { bearer, ed25519PemPair, freshStore, joinWithProof, json, LLMS_TXT, MemoryKv, postJson } from "./support.js";
 
 const governed = { id: "store-v1", revision: 1 };
 const terms = "store-v1.1";
@@ -23,14 +20,12 @@ describe("store-v1 safety contract", () => {
   let previousKey: string | undefined;
   let previousScannerRules: string | undefined;
   let previousModerator: string | undefined;
-  let previousDataDir: string | undefined;
 
   beforeEach(() => {
     freshStore();
     previousKey = process.env.STORE_ENCRYPTION_KEY;
     previousScannerRules = process.env.STORE_V1_BLOCKED_TERMS;
     previousModerator = process.env.MODERATION_TOKEN;
-    previousDataDir = process.env.DATA_DIR;
     process.env.STORE_ENCRYPTION_KEY = randomBytes(32).toString("base64");
     setStoreV1ScannerForTests((body) => !body.includes("reject-me"));
   });
@@ -41,7 +36,6 @@ describe("store-v1 safety contract", () => {
       STORE_ENCRYPTION_KEY: previousKey,
       STORE_V1_BLOCKED_TERMS: previousScannerRules,
       MODERATION_TOKEN: previousModerator,
-      DATA_DIR: previousDataDir,
     })) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -49,7 +43,7 @@ describe("store-v1 safety contract", () => {
   });
 
   it("fails governed creation without an active scanner, advertises immutable capabilities, and requires terms before bind", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     setStoreV1ScannerForTests(null);
@@ -99,7 +93,7 @@ describe("store-v1 safety contract", () => {
   });
 
   it("scans before mutation and enforces directional blocks across a rejoin", async () => {
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const created = await json(app, "/v1/channels", postJson({
@@ -149,7 +143,7 @@ describe("store-v1 safety contract", () => {
 
   it("uses canonical Ed25519 SPKI identity across PEM wrapping for seats, blocks, and bans", async () => {
     process.env.MODERATION_TOKEN = "test-moderator";
-    const app = createApp();
+    const app = createApp(LLMS_TXT);
     const a = ed25519PemPair();
     const b = ed25519PemPair();
     const wrappedB = { ...b, publicPem: rewrapPem(b.publicPem) };
@@ -190,11 +184,11 @@ describe("store-v1 safety contract", () => {
   });
 
   it("persists encrypted report evidence independently of the room and restricts moderator actions", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleeting-safety-"));
-    process.env.DATA_DIR = dir;
+    const kv = new MemoryKv();
+    attachStorage(store, kv);
     process.env.MODERATION_TOKEN = "test-moderator";
     try {
-      const app = createApp();
+      const app = createApp(LLMS_TXT);
       const a = ed25519PemPair();
       const b = ed25519PemPair();
       const created = await json(app, "/v1/channels", postJson({
@@ -210,10 +204,10 @@ describe("store-v1 safety contract", () => {
       const sent = await json(app, `/v1/channels/${id}/messages`, postJson({ body: "evidence-canary" }, bearer(joined.body.token as string)));
       const report = await json(app, `/v1/channels/${id}/reports`, postJson({ message_id: sent.body.message.id, reason: "abuse" }, bearer(created.body.token as string)));
       assert.equal(report.status, 201);
-      await flushStore(store);
-      const disk = readFileSync(join(dir, "fleeting.sqlite"));
-      assert.equal(disk.includes(Buffer.from("evidence-canary")), false);
-      assert.equal(disk.includes(Buffer.from("abuse")), false);
+      flushStore(store);
+      const disk = kv.dump();
+      assert.equal(disk.includes("evidence-canary"), false);
+      assert.equal(disk.includes("abuse"), false);
 
       const denied = await json(app, "/v1/moderation/reports", { headers: bearer(created.body.token as string) });
       assert.equal(denied.status, 403);
@@ -234,15 +228,15 @@ describe("store-v1 safety contract", () => {
       assert.equal(store.moderationActions.size, 2);
 
       store.deleteChannel(id);
-      await flushStore(store);
+      flushStore(store);
       freshStore();
-      await loadStore(store);
+      attachStorage(store, kv);
       assert.equal(store.reports.get(report.body.report_id as string)?.evidenceBody, "evidence-canary");
       store.reports.get(report.body.report_id as string)!.expiresAt = Date.now() - 1;
       store.sweep();
       assert.equal(store.reports.has(report.body.report_id as string), false);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      detachStorage();
     }
   });
 });

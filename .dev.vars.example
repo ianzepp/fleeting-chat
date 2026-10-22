@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev`. Generate fresh local values; never reuse production ones.
+# STORE_ENCRYPTION_KEY: openssl rand -base64 32
+STORE_ENCRYPTION_KEY=
+MODERATION_TOKEN=
+STORE_V1_BLOCKED_TERMS=
