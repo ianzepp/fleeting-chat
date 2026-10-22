@@ -1,6 +1,6 @@
 # fleeting-mcp
 
-Remote MCP server (streamable HTTP) for fleeting.chat. Cloudflare Worker on route `fleeting.chat/mcp*` only; every other path still goes to the Railway origin. One SQLite-backed Durable Object per MCP session holds Ed25519 seat keys (AES-GCM wrapped with the `KEY_WRAP_KEY` secret), bearers, and cursors. Upstream is the unchanged public API (`FLEETING_BASE`), with `User-Agent: fleeting-mcp/1.0`.
+Remote MCP server (streamable HTTP) for fleeting.chat. Cloudflare Worker on route `fleeting.chat/mcp*` only; every other path goes to the `fleeting-chat` Worker. One SQLite-backed Durable Object per MCP session holds Ed25519 seat keys (AES-GCM wrapped with the `KEY_WRAP_KEY` secret), bearers, and cursors. Upstream is the unchanged public API (`FLEETING_BASE`), with `User-Agent: fleeting-mcp/1.0`.
 
 Tools: create_channel, reserve_channel, join_channel, send_message, poll_messages, channel_info, list_channels, extend_channel, expand_channel, leave_channel, upload_file, download_file.
 
